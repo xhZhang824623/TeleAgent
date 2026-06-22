@@ -1,0 +1,144 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --page-bg: #f7f8fa;
+  --ink: #111827;
+  --ink-soft: #374151;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --panel: #ffffff;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: #eef2ff;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-md: 0 4px 16px rgba(16, 24, 40, 0.06);
+}
+
+html {
+  /* 极淡的双色渐变 + 顶部柔光，给纯色背景一点深度 */
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgba(79, 70, 229, 0.05), transparent 60%),
+    linear-gradient(180deg, #fbfbfd 0%, var(--page-bg) 40%);
+  background-attachment: fixed;
+}
+
+body {
+  @apply antialiased min-h-screen flex flex-col;
+  color: var(--ink);
+  background: transparent;
+  font-family: var(--font-inter), "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+  letter-spacing: -0.006em;
+}
+
+.header {
+  @apply sticky top-0 z-50 flex flex-wrap items-center justify-between gap-3 px-4 py-3 md:px-8 md:py-4;
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+}
+
+.header h1 a {
+  @apply no-underline font-semibold tracking-tight text-[15px] md:text-base;
+  color: var(--ink);
+}
+
+.header nav {
+  @apply flex items-center gap-4 text-sm font-medium;
+  color: var(--muted);
+}
+
+.header nav a:hover,
+.header nav a.active {
+  color: var(--accent);
+}
+
+.main {
+  @apply flex-1 p-4 md:p-6 max-w-6xl mx-auto w-full;
+}
+
+.footer {
+  @apply px-4 pb-6 pt-3 text-center text-xs;
+  color: var(--muted);
+}
+
+@keyframes message-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-enter {
+  animation: message-enter 200ms ease-out;
+}
+
+.status-pulse {
+  animation: status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%, 100% {
+    transform: scale(0.9);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.95;
+  }
+}
+
+.conversation-card {
+  transition:
+    box-shadow 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+/* 自定义下拉：去掉原生外观，加一个统一的小箭头 */
+.select-clean {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  padding-right: 2rem;
+  cursor: pointer;
+}
+.select-clean:hover { border-color: #d1d5db; }
+
+/* 聊天区 markdown 渲染（紧凑、克制、像产品而不是文档） */
+.chat-md { @apply text-sm leading-7 text-[#1f2937]; }
+.chat-md > :first-child { margin-top: 0; }
+.chat-md > :last-child { margin-bottom: 0; }
+.chat-md p { @apply my-2; }
+.chat-md strong { @apply font-semibold text-[#111827]; }
+.chat-md a { @apply text-[#4f46e5] underline underline-offset-2; }
+.chat-md ul { @apply my-2 list-disc space-y-1 pl-5; }
+.chat-md ol { @apply my-2 list-decimal space-y-1 pl-5; }
+.chat-md h1 { @apply mt-4 mb-2 text-base font-semibold text-[#111827]; }
+.chat-md h2 { @apply mt-4 mb-2 text-[15px] font-semibold text-[#111827]; }
+.chat-md h3 { @apply mt-3 mb-1.5 text-sm font-semibold text-[#111827]; }
+.chat-md hr { @apply my-3 border-[#eceef1]; }
+.chat-md blockquote { @apply my-2 border-l-2 border-[#e0e7ff] pl-3 text-[#4b5563]; }
+.chat-md code { @apply rounded-md bg-[#eef2ff] px-1.5 py-0.5 font-mono text-[12.5px] text-[#4338ca]; }
+.chat-md pre { @apply my-3 overflow-x-auto rounded-xl bg-[#0f172a] p-3.5 text-[12.5px] leading-6; }
+.chat-md pre code { @apply block bg-transparent p-0 text-[#e2e8f0]; }
+.chat-md table { @apply my-3 block w-full overflow-x-auto border-separate border-spacing-0 text-[13px]; }
+.chat-md thead { @apply bg-[#f8f9fb]; }
+.chat-md th { @apply border-b border-[#e5e7eb] px-3 py-2 text-left font-semibold text-[#374151]; }
+.chat-md td { @apply border-b border-[#f1f2f4] px-3 py-2 align-top text-[#4b5563]; }
+.chat-md tr:last-child td { @apply border-b-0; }
+
+/* 暗色气泡里的 markdown（用户消息） */
+.chat-md-dark { @apply text-sm leading-7 text-white/95; }
+.chat-md-dark code { @apply rounded bg-white/15 px-1.5 py-0.5 font-mono text-[12.5px] text-white; }
+.chat-md-dark a { @apply text-white underline; }
