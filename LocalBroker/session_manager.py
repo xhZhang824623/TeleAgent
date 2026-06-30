@@ -35,6 +35,7 @@ session_manager.py – 常驻（warm）Agent 会话管理。
 """
 
 import json
+import os
 import subprocess
 import threading
 import queue
@@ -52,6 +53,63 @@ except ModuleNotFoundError:
 
 # 真正支持常驻进程的 agent 类型。其余类型走一次性回退路径。
 WARM_CAPABLE_AGENTS = {"claude_code"}
+
+# 交互式审批：开启后给常驻 claude 注入 PreToolUse hook（把审批转给 Web 用户）。
+# 运行时可由 Qt 界面的开关切换；默认值来自环境变量 BROKER_INTERACTIVE_PERMISSIONS。
+_INTERACTIVE_PERMISSIONS = os.environ.get("BROKER_INTERACTIVE_PERMISSIONS", "0").lower() in ("1", "true", "yes")
+
+
+def interactive_permissions_enabled() -> bool:
+    return _INTERACTIVE_PERMISSIONS
+
+
+def set_interactive_permissions(enabled: bool) -> None:
+    """运行时切换交互式审批（影响之后新预热的常驻会话的启动参数）。"""
+    global _INTERACTIVE_PERMISSIONS
+    _INTERACTIVE_PERMISSIONS = bool(enabled)
+# 触发审批 hook 的敏感工具（只读工具不打扰）。matcher 为按工具名匹配的正则。
+# 覆盖会改文件/跑命令/联网的工具；只读工具（Read/Grep/Glob/LS 等）不拦，避免打扰。
+PERMISSION_HOOK_MATCHER = os.environ.get(
+    "BROKER_PERMISSION_HOOK_MATCHER",
+    "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|Task|KillShell",
+)
+_HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+_HOOK_SCRIPT = os.path.join(_HOOK_DIR, "teleagent_permission_hook.py")
+_HOOK_SETTINGS_PATH = os.path.join(_HOOK_DIR, ".teleagent_hook_settings.json")
+
+
+def _strip_permission_overrides(args: List[str]) -> List[str]:
+    """移除会绕过 hook 的权限参数（skip / 各种非 default 的 --permission-mode），强制走默认模式让 hook 生效。"""
+    out: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--dangerously-skip-permissions":
+            i += 1
+            continue
+        if a == "--permission-mode" and i + 1 < len(args):
+            i += 2  # 丢弃 mode 及其取值
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
+def _ensure_hook_settings() -> str:
+    """写出（一次）含 PreToolUse 审批 hook 的 settings 文件并返回其路径。"""
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": PERMISSION_HOOK_MATCHER,
+                    "hooks": [{"type": "command", "command": f'python3 "{_HOOK_SCRIPT}"'}],
+                }
+            ]
+        }
+    }
+    with open(_HOOK_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False)
+    return _HOOK_SETTINGS_PATH
 
 DEFAULT_IDLE_TTL_SEC = 600.0       # 会话关闭后空闲多久回收常驻进程
 DEFAULT_MAX_SESSIONS = 8           # 同时保活的常驻进程上限（控内存），超出按 LRU 回收
@@ -86,16 +144,24 @@ class WarmSession:
         force: bool = False,
         resume_session_id: Optional[str] = None,
         options: Optional[dict] = None,
+        extra_env: Optional[dict] = None,
     ):
         self.conv_id = conv_id
         self.cwd = cwd
         self.agent_type = agent_type
         self.force = force
         self.options = options or {}
+        # 注入到 Agent 子进程的额外环境变量（如 TELEAGENT_* 上下文，供 teleagent-send 使用）。
+        self.extra_env = extra_env or {}
         self.session_id: Optional[str] = resume_session_id
         self.last_activity: float = time.time()
         self._turn_lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
+        # 在跑一轮（run_turn 进行中）的繁忙标志：用于避免在轮次进行中拆除会话（杀掉在途任务）。
+        self._busy = False
+        self._busy_lock = threading.Lock()
+        # 「待回收」标记：交互式审批等设置变更时，繁忙会话延后到空闲再回收，避免打断在途任务。
+        self.recycle_requested = False
 
     # ── 生命周期 ─────────────────────────────────────────────
     def start(self) -> None:  # pragma: no cover - 抽象
@@ -103,6 +169,19 @@ class WarmSession:
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    # ── 繁忙/回收标记（并发安全拆除）────────────────────────────
+    def is_busy(self) -> bool:
+        with self._busy_lock:
+            return self._busy
+
+    def _set_busy(self, value: bool) -> None:
+        with self._busy_lock:
+            self._busy = bool(value)
+
+    def mark_for_recycle(self) -> None:
+        """标记本会话待回收：繁忙时由 reconcile 在其空闲后回收（套用新设置）。"""
+        self.recycle_requested = True
 
     def close(self) -> None:
         proc = self._proc
@@ -141,10 +220,12 @@ class ClaudeWarmSession(WarmSession):
 
     def __init__(self, conv_id, cwd, agent_type, *, force=False, resume_session_id=None,
                  options: Optional[dict] = None,
+                 extra_env: Optional[dict] = None,
                  which: Optional[Callable[[str], Optional[str]]] = None,
                  home_dir: Optional[Path] = None):
         super().__init__(conv_id, cwd, agent_type, force=force,
-                         resume_session_id=resume_session_id, options=options)
+                         resume_session_id=resume_session_id, options=options,
+                         extra_env=extra_env)
         self._which = which
         self._home_dir = home_dir
         self._events: "queue.Queue" = queue.Queue()
@@ -153,6 +234,12 @@ class ClaudeWarmSession(WarmSession):
         self._stdin_lock = threading.Lock()
         self._control_cv = threading.Condition()
         self._control_responses: Dict[str, dict] = {}
+        # 仍在等待应答的 control_request id 集合：读循环只收录这些 id 的响应，
+        # 超时/已放弃的 id 的迟到响应一律丢弃，避免 _control_responses 无界增长（内存泄漏）。
+        self._pending_control_ids: set = set()
+        # 交互式工具审批回调：on_permission(request_id, tool_name, tool_input) -> bool(allow)。
+        # 按 turn 设置（run_turn 期间生效），由读循环拦截 CLI 发来的 can_use_tool 请求时调用。
+        self._on_permission: Optional[Callable[[str, str, dict], bool]] = None
 
     def _build_launch_args(self) -> List[str]:
         kwargs = {}
@@ -168,13 +255,19 @@ class ClaudeWarmSession(WarmSession):
             "--verbose",  # --print 下 stream-json 输出要求 --verbose
             "--include-partial-messages",
         ]
-        args.extend(claude_option_args(self.options, force=self.force))
+        opt_args = claude_option_args(self.options, force=self.force)
+        if interactive_permissions_enabled():
+            # 交互式审批靠 PreToolUse hook：注入 settings，并去掉会绕过 hook 的权限覆盖（走默认模式）。
+            opt_args = _strip_permission_overrides(opt_args)
+            args.extend(["--settings", _ensure_hook_settings()])
+        args.extend(opt_args)
         if self.session_id:
             args.extend(["--resume", self.session_id])
         return args
 
     def start(self) -> None:
         args = self._build_launch_args()
+        env = {**os.environ, **self.extra_env} if self.extra_env else None
         self._proc = subprocess.Popen(
             args,
             cwd=self.cwd,
@@ -185,6 +278,7 @@ class ClaudeWarmSession(WarmSession):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=env,
         )
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -196,25 +290,43 @@ class ClaudeWarmSession(WarmSession):
                 line = raw_line.rstrip("\r\n")
                 if not line:
                     continue
+                # 单行处理隔离：任何一行解析/分发异常都不得杀死读线程（否则会话被「卡死」）。
                 try:
-                    obj = json.loads(line)
+                    self._handle_read_line(line)
                 except Exception:
                     self._events.put(("raw", line))
-                    continue
-                if obj.get("type") == "control_response":
-                    rid = (obj.get("response") or {}).get("request_id")
-                    if rid:
-                        with self._control_cv:
-                            self._control_responses[rid] = obj
-                            self._control_cv.notify_all()
-                    continue
-                self._events.put(("event", obj))
         except Exception:
             pass
         finally:
             self._events.put(("eof", None))
             with self._control_cv:  # 唤醒等待中的 send_control，避免进程退出后卡死
                 self._control_cv.notify_all()
+
+    def _handle_read_line(self, line: str) -> None:
+        """解析并分发一行 stdout。解析失败/非对象 JSON 当作原始行处理，绝不抛到读循环外。"""
+        try:
+            obj = json.loads(line)
+        except Exception:
+            self._events.put(("raw", line))
+            return
+        # 合法 JSON 但非对象（如 [1,2]/42）：不能 .get()，当作原始行跳过，避免 AttributeError 杀死读线程。
+        if not isinstance(obj, dict):
+            self._events.put(("raw", line))
+            return
+        if obj.get("type") == "control_response":
+            rid = (obj.get("response") or {}).get("request_id")
+            if rid:
+                with self._control_cv:
+                    # 只收录仍在等待的 id；超时/未知 id 的迟到响应丢弃（避免无界增长）。
+                    if rid in self._pending_control_ids:
+                        self._control_responses[rid] = obj
+                        self._control_cv.notify_all()
+            return
+        # CLI 反向发来的 control_request（目前只处理工具审批 can_use_tool）。
+        if obj.get("type") == "control_request":
+            self._maybe_handle_permission(obj)
+            return
+        self._events.put(("event", obj))
 
     def send_control(self, subtype: str, fields: Optional[dict] = None,
                      timeout: float = 10.0) -> Optional[dict]:
@@ -228,11 +340,17 @@ class ClaudeWarmSession(WarmSession):
         rid = f"ctl_{uuid.uuid4().hex[:8]}"
         req = {"type": "control_request", "request_id": rid,
                "request": {"subtype": subtype, **(fields or {})}}
+        # 登记为「等待中」，读循环据此只收录本 id 的响应。
+        with self._control_cv:
+            self._pending_control_ids.add(rid)
         try:
             with self._stdin_lock:
                 self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
                 self._proc.stdin.flush()
         except Exception:
+            with self._control_cv:
+                self._pending_control_ids.discard(rid)
+                self._control_responses.pop(rid, None)
             return None
         self.last_activity = time.time()
         deadline = time.time() + timeout
@@ -240,12 +358,72 @@ class ClaudeWarmSession(WarmSession):
             while rid not in self._control_responses:
                 remaining = deadline - time.time()
                 if remaining <= 0:
+                    # 超时放弃：清掉等待登记，迟到的响应将被读循环丢弃，不再驻留。
+                    self._pending_control_ids.discard(rid)
+                    self._control_responses.pop(rid, None)
                     return None
                 self._control_cv.wait(timeout=remaining)
+            self._pending_control_ids.discard(rid)
             return self._control_responses.pop(rid)
 
-    def run_turn(self, task_id, prompt, on_event, timeout_sec=1800.0) -> TurnResult:
+    # ── 交互式工具审批（人在环路）──────────────────────────────────
+    # CLI 在 stream-json 模式下就某个工具调用反向发来 control_request(can_use_tool)。
+    # 这里拦截 → 在独立线程里问回调（避免阻塞读循环）→ 回写 control_response。
+    #
+    # ⚠️ 注意：can_use_tool 的请求/响应确切字段名属于 Claude Code 未公开文档的协议，
+    # 下面的解析与回写按 SDK 行为做了最可能的推断，**需在装有 claude 的真机上实测对齐**。
+    # 解析/回写各自隔离在一个方法里，便于按实测结果调整。
+    @staticmethod
+    def _parse_permission_request(obj: dict) -> Optional[tuple]:
+        req = obj.get("request") or {}
+        if req.get("subtype") != "can_use_tool":
+            return None  # 其它 control_request 暂不处理
+        rid = obj.get("request_id") or req.get("request_id") or ""
+        tool_name = req.get("tool_name") or req.get("name") or ""
+        tool_input = req.get("input") or req.get("tool_input") or {}
+        return rid, tool_name, tool_input
+
+    def _maybe_handle_permission(self, obj: dict) -> None:
+        parsed = self._parse_permission_request(obj)
+        if parsed is None:
+            return
+        rid, tool_name, tool_input = parsed
+        cb = self._on_permission
+
+        def _resolve():
+            allow = False
+            try:
+                if cb is not None:
+                    allow = bool(cb(rid, tool_name, tool_input))
+            except Exception:
+                allow = False  # 网关异常/无回调 → 安全默认拒绝
+            self._respond_permission(rid, allow, tool_input)
+
+        threading.Thread(target=_resolve, daemon=True).start()
+
+    def _respond_permission(self, request_id: str, allow: bool, tool_input: dict) -> None:
+        inner = (
+            {"behavior": "allow", "updatedInput": tool_input}
+            if allow else
+            {"behavior": "deny", "message": "用户拒绝了该工具调用"}
+        )
+        envelope = {
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": request_id, "response": inner},
+        }
+        try:
+            with self._stdin_lock:
+                self._proc.stdin.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+                self._proc.stdin.flush()
+        except Exception:
+            pass
+
+    def run_turn(self, task_id, prompt, on_event, timeout_sec=1800.0,
+                 on_permission=None) -> TurnResult:
         with self._turn_lock:
+          self._on_permission = on_permission
+          self._set_busy(True)
+          try:
             self.last_activity = time.time()
             if not self.is_alive():
                 return TurnResult(status="failed", error="warm session process is not alive")
@@ -309,6 +487,9 @@ class ClaudeWarmSession(WarmSession):
                 session_id=self.session_id,
                 events=events,
             )
+          finally:
+            self._on_permission = None
+            self._set_busy(False)
 
 
 def create_warm_session(
@@ -319,6 +500,7 @@ def create_warm_session(
     force: bool = False,
     resume_session_id: Optional[str] = None,
     options: Optional[dict] = None,
+    extra_env: Optional[dict] = None,
     which: Optional[Callable[[str], Optional[str]]] = None,
     home_dir: Optional[Path] = None,
 ) -> Optional[WarmSession]:
@@ -327,7 +509,7 @@ def create_warm_session(
         return ClaudeWarmSession(
             conv_id, cwd, agent_type,
             force=force, resume_session_id=resume_session_id, options=options,
-            which=which, home_dir=home_dir,
+            extra_env=extra_env, which=which, home_dir=home_dir,
         )
     # codex / cursor_agent: 暂不支持常驻，调用方回退到一次性路径。
     return None
@@ -365,6 +547,7 @@ class SessionManager:
         force: bool = False,
         resume_session_id: Optional[str] = None,
         options: Optional[dict] = None,
+        extra_env: Optional[dict] = None,
     ) -> Optional[WarmSession]:
         """
         返回该会话的常驻进程（必要时启动）。不支持常驻或启动失败时返回 None，
@@ -372,11 +555,12 @@ class SessionManager:
         """
         if not is_warm_capable(agent_type):
             return None
+        evicted: List[WarmSession] = []
         with self._lock:
             existing = self._sessions.get(conv_id)
             if existing is not None and existing.is_alive():
                 return existing
-            # 进程已死/不存在：清理后重建（带 resume 兜底）
+            # 进程已死/不存在：清理后重建（带 resume 兜底）。死进程 close 很快，留在锁内可接受。
             if existing is not None:
                 existing.close()
                 self._sessions.pop(conv_id, None)
@@ -385,6 +569,7 @@ class SessionManager:
                 force=force,
                 resume_session_id=resume_session_id or (existing.session_id if existing else None),
                 options=options,
+                extra_env=extra_env,
             )
             if session is None:
                 return None
@@ -397,8 +582,14 @@ class SessionManager:
                     pass
                 return None
             self._sessions[conv_id] = session
-            self._evict_over_capacity_locked(keep=conv_id)
-            return session
+            evicted = self._evict_over_capacity_locked(keep=conv_id)
+        # 超容量回收的会话在锁外 close（terminate + 最长 3s wait），避免拖住派发/轮询。
+        for s in evicted:
+            try:
+                s.close()
+            except Exception:
+                pass
+        return session
 
     def reconcile(self, active_conv_ids) -> List[str]:
         """
@@ -410,39 +601,80 @@ class SessionManager:
         active = set(active_conv_ids or [])
         now = time.time()
         closed: List[str] = []
+        to_close: List[WarmSession] = []
         with self._lock:
             for conv_id, session in list(self._sessions.items()):
                 dead = not session.is_alive()
+                busy = session.is_busy()
+                # 繁忙（在途轮次）会话不因空闲/待回收而被拆除，避免打断在途任务。
                 idle_closed = (
-                    conv_id not in active
+                    not busy
+                    and conv_id not in active
                     and (now - session.last_activity) >= self._idle_ttl
                 )
-                if dead or idle_closed:
-                    session.close()
+                recycle = session.recycle_requested and not busy
+                if dead or idle_closed or recycle:
                     self._sessions.pop(conv_id, None)
+                    to_close.append(session)
                     closed.append(conv_id)
-            self._evict_over_capacity_locked()
+            to_close.extend(self._evict_over_capacity_locked())
+        # close（含 terminate + 最长 3s wait）放到锁外，避免拖住派发/轮询。
+        for session in to_close:
+            try:
+                session.close()
+            except Exception:
+                pass
         return closed
 
-    def _evict_over_capacity_locked(self, keep: Optional[str] = None) -> None:
-        """超出 max_sessions 时按 last_activity LRU 回收（保留 keep）。调用方须已持锁。"""
+    def _evict_over_capacity_locked(self, keep: Optional[str] = None) -> List[WarmSession]:
+        """超出 max_sessions 时按 last_activity LRU 选出待回收会话，从注册表移除并返回。
+        调用方须已持锁，并在**锁外** close 返回的会话。跳过繁忙会话（容量可短暂超限）。"""
         if len(self._sessions) <= self._max_sessions:
-            return
+            return []
         victims = sorted(self._sessions.items(), key=lambda kv: kv[1].last_activity)
+        evicted: List[WarmSession] = []
         for conv_id, session in victims:
             if len(self._sessions) <= self._max_sessions:
                 break
             if conv_id == keep:
                 continue
-            session.close()
+            if session.is_busy():
+                continue
             self._sessions.pop(conv_id, None)
+            evicted.append(session)
+        return evicted
 
     def active_conv_ids(self) -> List[str]:
         with self._lock:
             return list(self._sessions.keys())
 
-    def shutdown_all(self) -> None:
+    def restart_idle_sessions(self) -> List[str]:
+        """回收所有空闲常驻会话以套用新设置；繁忙会话标记为待回收，待其空闲后由 reconcile 回收。
+        不打断在途轮次。返回被立即回收的 conv_id 列表。"""
+        closed: List[str] = []
+        to_close: List[WarmSession] = []
         with self._lock:
-            for session in self._sessions.values():
+            for conv_id, session in list(self._sessions.items()):
+                if session.is_busy():
+                    session.mark_for_recycle()
+                    continue
+                self._sessions.pop(conv_id, None)
+                to_close.append(session)
+                closed.append(conv_id)
+        for session in to_close:
+            try:
                 session.close()
+            except Exception:
+                pass
+        return closed
+
+    def shutdown_all(self) -> None:
+        """关停所有常驻会话（应用退出路径）：强制关闭，包括繁忙会话。"""
+        with self._lock:
+            sessions = list(self._sessions.values())
             self._sessions.clear()
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass

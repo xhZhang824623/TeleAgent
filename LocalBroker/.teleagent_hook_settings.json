@@ -1,0 +1,1 @@
+{"hooks": {"PreToolUse": [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|Task|KillShell", "hooks": [{"type": "command", "command": "python3 \"/home/nealzhang/dev/TeleAgent/LocalBroker/teleagent_permission_hook.py\""}]}]}}

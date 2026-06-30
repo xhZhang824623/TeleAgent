@@ -75,7 +75,7 @@ class _FakeWarmSession(WarmSession):
         self._alive = False
 
 
-def _fake_factory(conv_id, cwd, agent_type, *, force=False, resume_session_id=None, options=None):
+def _fake_factory(conv_id, cwd, agent_type, *, force=False, resume_session_id=None, options=None, extra_env=None):
     if agent_type != "claude_code":
         return None
     return _FakeWarmSession(conv_id, cwd, agent_type, force=force, resume_session_id=resume_session_id)

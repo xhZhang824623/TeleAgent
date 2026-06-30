@@ -233,6 +233,119 @@ def ack_control(
     )
 
 
+def get_pending_fs_requests(
+    client_id: str, base: str = DEFAULT_BASE, token: Optional[str] = None
+) -> List[Dict]:
+    """拉取分配给该 client 的待处理目录浏览请求。"""
+    return _req("GET", f"/fs/pending/?client_id={client_id}", base=base, token=token)
+
+
+def ack_fs_request(
+    req_id: str,
+    *,
+    status: str,
+    listed_path: str = "",
+    parent_path: Optional[str] = None,
+    entries: Optional[List[Dict]] = None,
+    error: str = "",
+    base: str = DEFAULT_BASE,
+    token: Optional[str] = None,
+) -> Dict:
+    """回传某条目录浏览请求的结果（done / failed）。"""
+    return _req(
+        "PATCH",
+        f"/fs/requests/{req_id}/",
+        body={
+            "status": status,
+            "listed_path": listed_path,
+            "parent_path": parent_path,
+            "entries": entries or [],
+            "error": error,
+        },
+        base=base,
+        token=token,
+    )
+
+
+def create_permission_request(
+    conversation_id: str,
+    tool_name: str,
+    *,
+    tool_input: Optional[Dict] = None,
+    request_id: str = "",
+    task_id: Optional[str] = None,
+    base: str = DEFAULT_BASE,
+    token: Optional[str] = None,
+) -> Dict:
+    """就某个工具调用建一条待应答的审批请求（pending）。"""
+    body = {
+        "conversation_id": conversation_id,
+        "tool_name": tool_name,
+        "tool_input": tool_input or {},
+        "request_id": request_id,
+    }
+    if task_id:
+        body["task_id"] = task_id
+    return _req("POST", "/permissions/", body=body, base=base, token=token)
+
+
+def get_permission_request(
+    perm_id: str, base: str = DEFAULT_BASE, token: Optional[str] = None
+) -> Dict:
+    """轮询某条审批请求的状态（pending / allowed / denied）。"""
+    return _req("GET", f"/permissions/{perm_id}/", base=base, token=token)
+
+
+def create_file_transfer(
+    client_id: str,
+    path: str,
+    *,
+    conversation_id: Optional[str] = None,
+    agent_initiated: bool = False,
+    base: str = DEFAULT_BASE,
+    token: Optional[str] = None,
+) -> Dict:
+    """发起一次文件传输记录（Web 发起为 pending；AI 发起置 agent_initiated）。"""
+    body = {"client_id": client_id, "path": path, "agent_initiated": agent_initiated}
+    if conversation_id:
+        body["conversation_id"] = conversation_id
+    return _req("POST", "/files/request/", body=body, base=base, token=token)
+
+
+def get_pending_file_transfers(
+    client_id: str, base: str = DEFAULT_BASE, token: Optional[str] = None
+) -> List[Dict]:
+    """拉取该 client 待上传的文件传输（Web 发起、需 broker 读盘上传的那些）。"""
+    return _req("GET", f"/files/pending/?client_id={client_id}", base=base, token=token)
+
+
+def upload_file_transfer(
+    transfer_id: str,
+    *,
+    filename: str,
+    content_b64: str,
+    content_type: str = "",
+    base: str = DEFAULT_BASE,
+    token: Optional[str] = None,
+) -> Dict:
+    """上传文件内容（base64）。服务端校验大小上限后落盘并置为 ready。"""
+    return _req(
+        "POST", f"/files/{transfer_id}/upload/",
+        body={"filename": filename, "content_b64": content_b64, "content_type": content_type},
+        base=base, token=token,
+    )
+
+
+def fail_file_transfer(
+    transfer_id: str, *, error: str = "", base: str = DEFAULT_BASE, token: Optional[str] = None
+) -> Dict:
+    """回报某次文件传输失败（读不到/过大/无权限）。"""
+    return _req(
+        "PATCH", f"/files/{transfer_id}/",
+        body={"status": "failed", "error": error}, base=base, token=token,
+    )
+
+
 def close_conversation(
     conv_id: str, base: str = DEFAULT_BASE, token: Optional[str] = None
 ) -> Dict:
