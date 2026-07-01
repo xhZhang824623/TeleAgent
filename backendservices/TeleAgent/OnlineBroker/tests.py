@@ -7,8 +7,65 @@ from django.utils import timezone
 from datetime import timedelta
 from types import SimpleNamespace
 
-from .models import AgentClient, BrokerClientCredential, Conversation, Task, TaskEvent
+from django.contrib.auth.hashers import make_password
+
+from .models import (
+    AgentClient, BrokerClientCredential, BrokerClientToken, Conversation, Task, TaskEvent,
+)
 from .views import _iter_task_events
+
+
+class BrokerClientTokenAuthTests(TestCase):
+    """FIX 2：client-login 返回每条凭证专属的 broker Token（最小授权），而非用户主 Token。"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="bt@example.com", email="bt@example.com", password="secret123",
+        )
+        self.secret = "broker-secret-key"
+        self.cred = BrokerClientCredential.objects.create(
+            name="PC", user=self.user, secret_hash=make_password(self.secret),
+        )
+
+    def _login(self):
+        return APIClient().post(
+            "/api/auth/client-login/",
+            {"client_id": str(self.cred.id), "secret_key": self.secret},
+            format="json",
+        )
+
+    def test_client_login_issues_scoped_token_not_master_token(self):
+        master = Token.objects.create(user=self.user)
+        resp = self._login()
+        self.assertEqual(resp.status_code, 200)
+        broker_key = resp.json()["token"]
+        # 返回的不是用户主 Token。
+        self.assertNotEqual(broker_key, master.key)
+        # 是一条与该凭证关联的 BrokerClientToken。
+        bt = BrokerClientToken.objects.get(credential=self.cred)
+        self.assertEqual(bt.key, broker_key)
+
+    def test_broker_token_authenticates_broker_endpoints(self):
+        broker_key = self._login().json()["token"]
+        api = APIClient()
+        api.credentials(HTTP_AUTHORIZATION=f"Token {broker_key}")
+        # broker Token 能访问 broker 端点，且归属到凭证用户。
+        resp = api.get("/api/broker/clients/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_master_user_token_still_works(self):
+        master = Token.objects.create(user=self.user)
+        api = APIClient()
+        api.credentials(HTTP_AUTHORIZATION=f"Token {master.key}")
+        self.assertEqual(api.get("/api/broker/clients/").status_code, 200)
+
+    def test_deleting_credential_revokes_token(self):
+        broker_key = self._login().json()["token"]
+        self.cred.delete()  # 级联吊销
+        self.assertFalse(BrokerClientToken.objects.filter(key=broker_key).exists())
+        api = APIClient()
+        api.credentials(HTTP_AUTHORIZATION=f"Token {broker_key}")
+        self.assertEqual(api.get("/api/broker/clients/").status_code, 401)
 
 
 class BrokerAgentSelectionTests(TestCase):
@@ -266,7 +323,9 @@ class TaskLeaseRecoveryTests(TestCase):
             agent_type="codex",
         )
 
-    def test_stale_running_task_is_requeued_when_client_polls(self):
+    def test_stale_running_task_is_failed_when_client_polls(self):
+        # 行为变更（FIX 4）：失联（租约超时）的 RUNNING 任务被标记为 FAILED 终态，并保留事件行，
+        # 而非重排队重跑（避免重复执行与输出丢失）。租约阈值已提高到 600s，故用 15 分钟构造超时。
         task = Task.objects.create(
             conversation=self.conversation,
             assigned_client=self.agent_client,
@@ -274,8 +333,8 @@ class TaskLeaseRecoveryTests(TestCase):
             prompt="Recover me",
             status=Task.Status.RUNNING,
             cwd="/tmp/project",
-            started_at=timezone.now() - timedelta(minutes=5),
-            heartbeat_at=timezone.now() - timedelta(minutes=5),
+            started_at=timezone.now() - timedelta(minutes=15),
+            heartbeat_at=timezone.now() - timedelta(minutes=15),
             result_text="partial output",
             exit_code=123,
         )
@@ -287,16 +346,16 @@ class TaskLeaseRecoveryTests(TestCase):
         response = self.client.get(f"/api/broker/tasks/queued/?client_id={self.agent_client.id}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item["id"] for item in response.json()], [str(task.id)])
+        # 任务已是 FAILED 终态，不再出现在可执行队列里。
+        self.assertEqual(response.json(), [])
 
         task.refresh_from_db()
-        self.assertEqual(task.status, Task.Status.QUEUED)
-        self.assertIsNone(task.started_at)
-        self.assertIsNone(task.finished_at)
+        self.assertEqual(task.status, Task.Status.FAILED)
         self.assertIsNone(task.heartbeat_at)
-        self.assertIsNone(task.result_text)
-        self.assertIsNone(task.exit_code)
-        self.assertEqual(task.event_rows.count(), 0)  # 重新入队会清掉上一轮事件行
+        self.assertIsNotNone(task.finished_at)
+        self.assertIn("partial output", task.result_text)  # 保留已产出内容
+        self.assertIn("租约超时", task.result_text)          # 追加失联说明
+        self.assertEqual(task.event_rows.count(), 1)        # 事件行被保留
 
     def test_recent_running_task_is_not_requeued(self):
         Task.objects.create(
@@ -347,6 +406,45 @@ class TaskLeaseRecoveryTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, Task.Status.SUCCESS)
         self.assertIsNone(task.heartbeat_at)
+
+    def test_reap_command_fails_stale_without_client_poll(self):
+        """权威回收：管理命令不依赖任何 client 轮询即可把超时任务标记为 FAILED（保留事件）。"""
+        from django.core.management import call_command
+
+        stale = Task.objects.create(
+            conversation=self.conversation,
+            assigned_client=self.agent_client,
+            agent_type="codex",
+            prompt="Reap me",
+            status=Task.Status.RUNNING,
+            cwd="/tmp/project",
+            started_at=timezone.now() - timedelta(minutes=15),
+            heartbeat_at=timezone.now() - timedelta(minutes=15),
+            result_text="partial",
+            exit_code=7,
+        )
+        TaskEvent.objects.create(task=stale, seq=1, payload={"type": "assistant"})
+        fresh = Task.objects.create(
+            conversation=self.conversation,
+            assigned_client=self.agent_client,
+            agent_type="codex",
+            prompt="Keep me",
+            status=Task.Status.RUNNING,
+            cwd="/tmp/project",
+            started_at=timezone.now(),
+            heartbeat_at=timezone.now(),
+        )
+
+        call_command("reap_stale_tasks")
+
+        stale.refresh_from_db()
+        fresh.refresh_from_db()
+        self.assertEqual(stale.status, Task.Status.FAILED)
+        self.assertIsNone(stale.heartbeat_at)
+        self.assertIn("partial", stale.result_text)          # 保留已产出内容
+        self.assertIn("租约超时", stale.result_text)           # 追加失联说明
+        self.assertEqual(stale.event_rows.count(), 1)        # 事件行被保留
+        self.assertEqual(fresh.status, Task.Status.RUNNING)  # 心跳新鲜，不回收
 
 
 class BrokerCredentialAdminTests(TestCase):
@@ -666,3 +764,274 @@ class ConversationControlTests(TestCase):
         # no longer pending
         pend2 = self.client.get(f"/api/broker/controls/pending/?client_id={self.agent.id}").json()
         self.assertEqual(pend2, [])
+
+
+class FsBrowseTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="fs@example.com", email="fs@example.com", password="secret123",
+        )
+        self.token = Token.objects.create(user=self.user)
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        self.agent = AgentClient.objects.create(
+            owner=self.user, name="FS PC", hostname="fs-pc.local", supported_agents=["codex"],
+        )
+
+    def test_browse_create_pull_ack_roundtrip(self):
+        # Web 建请求
+        created = self.client.post(
+            "/api/broker/fs/browse/", {"client_id": str(self.agent.id), "path": ""}, format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        req_id = created.json()["id"]
+        self.assertEqual(created.json()["status"], "pending")
+
+        # broker 拉取待处理
+        pend = self.client.get(f"/api/broker/fs/pending/?client_id={self.agent.id}").json()
+        self.assertEqual([p["id"] for p in pend], [req_id])
+
+        # broker 回传结果
+        ack = self.client.patch(
+            f"/api/broker/fs/requests/{req_id}/",
+            {
+                "status": "done",
+                "listed_path": "/home/u",
+                "parent_path": "/home",
+                "entries": [{"name": "proj", "path": "/home/u/proj", "is_dir": True}],
+                "error": "",
+            },
+            format="json",
+        )
+        self.assertEqual(ack.status_code, 200)
+
+        # Web 取结果
+        got = self.client.get(f"/api/broker/fs/browse/{req_id}/").json()
+        self.assertEqual(got["status"], "done")
+        self.assertEqual(got["listed_path"], "/home/u")
+        self.assertEqual(got["entries"][0]["name"], "proj")
+
+        # 不再 pending
+        pend2 = self.client.get(f"/api/broker/fs/pending/?client_id={self.agent.id}").json()
+        self.assertEqual(pend2, [])
+
+    def test_browse_rejects_foreign_client(self):
+        other = User.objects.create_user(
+            username="other-fs@example.com", email="other-fs@example.com", password="secret123",
+        )
+        foreign = AgentClient.objects.create(owner=other, name="Theirs", hostname="theirs.local")
+        r = self.client.post(
+            "/api/broker/fs/browse/", {"client_id": str(foreign.id), "path": "/"}, format="json",
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_browse_result_isolated_between_users(self):
+        from .models import FsBrowseRequest
+        req = FsBrowseRequest.objects.create(client=self.agent, path="")
+        other = User.objects.create_user(
+            username="snoop@example.com", email="snoop@example.com", password="secret123",
+        )
+        other_token = Token.objects.create(user=other)
+        snoop = APIClient()
+        snoop.credentials(HTTP_AUTHORIZATION=f"Token {other_token.key}")
+        r = snoop.get(f"/api/broker/fs/browse/{req.id}/")
+        self.assertEqual(r.status_code, 404)
+
+
+class PermissionRequestTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="perm@example.com", email="perm@example.com", password="secret123",
+        )
+        self.token = Token.objects.create(user=self.user)
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        self.agent = AgentClient.objects.create(
+            owner=self.user, name="Perm PC", hostname="perm-pc.local", supported_agents=["claude_code"],
+        )
+        self.conv = Conversation.objects.create(
+            owner=self.user, cwd="/tmp/project", title="Perm", assigned_client=self.agent,
+            agent_type="claude_code",
+        )
+
+    def test_create_poll_answer_roundtrip(self):
+        created = self.client.post(
+            "/api/broker/permissions/",
+            {
+                "conversation_id": str(self.conv.id),
+                "request_id": "ctl_abc123",
+                "tool_name": "Bash",
+                "tool_input": {"command": "rm -rf build"},
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        pid = created.json()["id"]
+        self.assertEqual(created.json()["status"], "pending")
+
+        pend = self.client.get(f"/api/broker/conversations/{self.conv.id}/permissions/pending/").json()
+        self.assertEqual([p["id"] for p in pend], [pid])
+
+        ans = self.client.patch(
+            f"/api/broker/permissions/{pid}/", {"decision": "allow", "remember": True}, format="json",
+        )
+        self.assertEqual(ans.status_code, 200)
+        self.assertEqual(ans.json()["status"], "allowed")
+        self.assertTrue(ans.json()["remember"])
+
+        got = self.client.get(f"/api/broker/permissions/{pid}/").json()
+        self.assertEqual(got["status"], "allowed")
+
+        pend2 = self.client.get(f"/api/broker/conversations/{self.conv.id}/permissions/pending/").json()
+        self.assertEqual(pend2, [])
+
+    def test_deny_answer(self):
+        created = self.client.post(
+            "/api/broker/permissions/",
+            {"conversation_id": str(self.conv.id), "tool_name": "Write", "tool_input": {"path": "/etc/x"}},
+            format="json",
+        )
+        pid = created.json()["id"]
+        ans = self.client.patch(f"/api/broker/permissions/{pid}/", {"decision": "deny"}, format="json")
+        self.assertEqual(ans.json()["status"], "denied")
+
+    def test_answer_is_idempotent(self):
+        created = self.client.post(
+            "/api/broker/permissions/",
+            {"conversation_id": str(self.conv.id), "tool_name": "Bash", "tool_input": {}},
+            format="json",
+        )
+        pid = created.json()["id"]
+        self.client.patch(f"/api/broker/permissions/{pid}/", {"decision": "allow"}, format="json")
+        second = self.client.patch(f"/api/broker/permissions/{pid}/", {"decision": "deny"}, format="json")
+        self.assertEqual(second.json()["status"], "allowed")
+
+    def test_foreign_conversation_rejected(self):
+        other = User.objects.create_user(
+            username="other-perm@example.com", email="other-perm@example.com", password="secret123",
+        )
+        other_conv = Conversation.objects.create(owner=other, cwd="/tmp/x", agent_type="claude_code")
+        r = self.client.post(
+            "/api/broker/permissions/",
+            {"conversation_id": str(other_conv.id), "tool_name": "Bash", "tool_input": {}},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 404)
+
+
+class FileTransferTests(TestCase):
+    def setUp(self):
+        import tempfile
+        self.media = tempfile.mkdtemp()
+        self.override = self.settings(MEDIA_ROOT=self.media)
+        self.override.enable()
+        self.user = User.objects.create_user(
+            username="ft@example.com", email="ft@example.com", password="secret123",
+        )
+        self.token = Token.objects.create(user=self.user)
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token.key}")
+        self.agent = AgentClient.objects.create(
+            owner=self.user, name="FT PC", hostname="ft-pc.local", supported_agents=["claude_code"],
+        )
+        self.conv = Conversation.objects.create(
+            owner=self.user, cwd="/tmp/project", title="FT", assigned_client=self.agent,
+            agent_type="claude_code",
+        )
+
+    def tearDown(self):
+        self.override.disable()
+
+    def test_web_initiated_request_pending_upload_download(self):
+        import base64
+        # web 发起：建 pending 传输
+        created = self.client.post(
+            "/api/broker/files/request/",
+            {"client_id": str(self.agent.id), "conversation_id": str(self.conv.id),
+             "path": "/home/u/report.pdf"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        tid = created.json()["id"]
+        self.assertEqual(created.json()["status"], "pending")
+        self.assertEqual(created.json()["filename"], "report.pdf")
+
+        # broker 拉取 pending
+        pend = self.client.get(f"/api/broker/files/pending/?client_id={self.agent.id}").json()
+        self.assertEqual([p["id"] for p in pend], [tid])
+
+        # broker 上传内容（base64）
+        payload = b"hello remote file"
+        up = self.client.post(
+            f"/api/broker/files/{tid}/upload/",
+            {"filename": "report.pdf", "content_type": "application/pdf",
+             "content_b64": base64.b64encode(payload).decode()},
+            format="json",
+        )
+        self.assertEqual(up.status_code, 200)
+        self.assertEqual(up.json()["status"], "ready")
+        self.assertEqual(up.json()["size"], len(payload))
+
+        # 不再 pending
+        pend2 = self.client.get(f"/api/broker/files/pending/?client_id={self.agent.id}").json()
+        self.assertEqual(pend2, [])
+
+        # web 下载，校验内容与附件头
+        dl = self.client.get(f"/api/broker/files/{tid}/download/")
+        self.assertEqual(dl.status_code, 200)
+        self.assertEqual(b"".join(dl.streaming_content), payload)
+        self.assertIn("attachment", dl["Content-Disposition"])
+
+    def test_agent_initiated_appears_in_conversation_files(self):
+        import base64
+        created = self.client.post(
+            "/api/broker/files/request/",
+            {"client_id": str(self.agent.id), "conversation_id": str(self.conv.id),
+             "path": "/home/u/out.txt", "agent_initiated": True},
+            format="json",
+        )
+        tid = created.json()["id"]
+        self.assertTrue(created.json()["agent_initiated"])
+        self.client.post(
+            f"/api/broker/files/{tid}/upload/",
+            {"filename": "out.txt", "content_b64": base64.b64encode(b"data").decode()},
+            format="json",
+        )
+        files = self.client.get(f"/api/broker/conversations/{self.conv.id}/files/").json()
+        self.assertEqual([f["id"] for f in files], [tid])
+        self.assertEqual(files[0]["status"], "ready")
+
+    def test_oversize_upload_rejected(self):
+        import base64
+        with self.settings(FILE_TRANSFER_MAX_BYTES=8):
+            created = self.client.post(
+                "/api/broker/files/request/",
+                {"client_id": str(self.agent.id), "conversation_id": str(self.conv.id),
+                 "path": "/big.bin"}, format="json",
+            )
+            tid = created.json()["id"]
+            up = self.client.post(
+                f"/api/broker/files/{tid}/upload/",
+                {"filename": "big.bin", "content_b64": base64.b64encode(b"0123456789").decode()},
+                format="json",
+            )
+            self.assertEqual(up.status_code, 413)
+
+    def test_foreign_client_rejected(self):
+        other = User.objects.create_user(username="o-ft@example.com", email="o-ft@example.com", password="x12345678")
+        foreign = AgentClient.objects.create(owner=other, name="Theirs", hostname="t.local")
+        r = self.client.post(
+            "/api/broker/files/request/",
+            {"client_id": str(foreign.id), "path": "/x"}, format="json",
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_download_requires_ready_and_owner(self):
+        # 未 ready 不可下载
+        created = self.client.post(
+            "/api/broker/files/request/",
+            {"client_id": str(self.agent.id), "conversation_id": str(self.conv.id),
+             "path": "/x.txt"}, format="json",
+        )
+        tid = created.json()["id"]
+        self.assertEqual(self.client.get(f"/api/broker/files/{tid}/download/").status_code, 404)

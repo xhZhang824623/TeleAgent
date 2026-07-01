@@ -1,0 +1,16 @@
+# 关键：不要把宿主机的 node_modules 带进构建上下文。
+# 否则 `COPY . .` 会覆盖 deps 阶段安装的干净 node_modules，
+# 触发 Next.js 的 "Cannot find module '../server/require-hook'" 构建失败。
+node_modules
+.next
+out
+
+# 杂项
+.git
+.gitignore
+Dockerfile
+.dockerignore
+npm-debug.log*
+.DS_Store
+*.local
+.env*.local

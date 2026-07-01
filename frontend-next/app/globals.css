@@ -2,70 +2,233 @@
 @tailwind components;
 @tailwind utilities;
 
+/* =========================================================================
+   TeleAgent Design System — tokens
+   Ported from the claude.ai/design "TeleAgent" project
+   (tokens/{colors,typography,spacing,effects}.css). These CSS variables are
+   the single source of truth; Tailwind semantic colors in tailwind.config.ts
+   map onto them, and the component library reads them directly.
+   ========================================================================= */
 :root {
-  --page-bg: #f7f8fa;
-  --ink: #111827;
-  --ink-soft: #374151;
-  --muted: #6b7280;
-  --line: #e5e7eb;
-  --panel: #ffffff;
-  --accent: #4f46e5;
-  --accent-hover: #4338ca;
-  --accent-soft: #eef2ff;
+  color-scheme: light;
+
+  /* ---- Base neutrals (ink scale) ---- */
+  --ta-ink: #111827;
+  --ta-ink-soft: #374151;
+  --ta-muted: #6b7280;
+  --ta-faint: #9ca3af;
+  --ta-line: #e5e7eb;
+  --ta-line-soft: #eceef1;
+  --ta-line-faint: #f3f4f6;
+
+  /* ---- Surfaces ---- */
+  --ta-page: #f7f8fa;
+  --ta-page-top: #fbfbfd;
+  --ta-panel: #ffffff;
+  --ta-surface-muted: #f9fafb;
+
+  /* ---- Accent (indigo) ---- */
+  --ta-accent: #4f46e5;
+  --ta-accent-hover: #4338ca;
+  --ta-accent-strong: #3730a3;
+  --ta-accent-soft: #eef2ff;
+  --ta-accent-ring: rgba(79, 70, 229, 0.15);
+  --ta-accent-border: #a5b4fc;
+
+  /* ---- Status: queued (amber) ---- */
+  --ta-queued-fg: #92400e;
+  --ta-queued-bg: #fef3c7;
+  --ta-queued-dot: #f59e0b;
+
+  /* ---- Status: running (sky) ---- */
+  --ta-running-fg: #075985;
+  --ta-running-bg: #e0f2fe;
+  --ta-running-dot: #0ea5e9;
+
+  /* ---- Status: success (emerald) ---- */
+  --ta-success-fg: #047857;
+  --ta-success-bg: #d1fae5;
+  --ta-success-soft: #ecfdf5;
+  --ta-success-dot: #10b981;
+
+  /* ---- Status: failed (rose) ---- */
+  --ta-failed-fg: #b91c1c;
+  --ta-failed-bg: #fef2f2;
+  --ta-failed-bg-strong: #fee2e2;
+  --ta-failed-border: #fecaca;
+  --ta-failed-dot: #f43f5e;
+
+  /* ---- Status: neutral (cancelled / timeout / idle) ---- */
+  --ta-neutral-fg: #44403c;
+  --ta-neutral-bg: #e7e5e4;
+  --ta-neutral-dot: #d1d5db;
+
+  /* ---- Dark code block (markdown pre) ---- */
+  --ta-code-bg: #0f172a;
+  --ta-code-fg: #e2e8f0;
+
+  /* ---- Semantic aliases ---- */
+  --text-strong: var(--ta-ink);
+  --text-body: var(--ta-ink-soft);
+  --text-muted: var(--ta-muted);
+  --text-faint: var(--ta-faint);
+  --text-accent: var(--ta-accent);
+  --text-on-dark: #f8fafc;
+
+  --surface-page: var(--ta-page);
+  --surface-card: var(--ta-panel);
+  --surface-inset: var(--ta-surface-muted);
+  --surface-accent: var(--ta-accent-soft);
+  --surface-dark: var(--ta-ink);
+
+  --border-default: var(--ta-line);
+  --border-soft: var(--ta-line-soft);
+  --border-focus: var(--ta-accent);
+
+  /* ---- Typography ---- */
+  --font-sans: var(--font-inter), "Inter", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --font-feature-sans: "cv02", "cv03", "cv04", "ss01";
+
+  --text-hero: 3rem;
+  --text-display: 1.875rem;
+  --text-title: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-lg: 1.0625rem;
+  --text-base: 1rem;
+  --text-sm: 0.875rem;
+  --text-xs: 0.8125rem;
+  --text-2xs: 0.6875rem;
+  --text-3xs: 0.625rem;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.1;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.75;
+
+  --tracking-display: -0.02em;
+  --tracking-body: -0.006em;
+  --tracking-normal: 0em;
+  --tracking-eyebrow: 0.22em;
+  --tracking-eyebrow-wide: 0.24em;
+  --tracking-chip: 0.16em;
+
+  /* ---- Spacing & radii ---- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-pill: 9999px;
+
+  --sidebar-width: 21rem;
+  --content-max: 72rem;
+  --reading-max: 56rem;
+
+  /* ---- Elevation ---- */
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.04);
   --shadow-md: 0 4px 16px rgba(16, 24, 40, 0.06);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.05);
+  --shadow-soft: 0 6px 24px -8px rgba(16, 24, 40, 0.12), 0 2px 8px -4px rgba(16, 24, 40, 0.06);
+  --shadow-pop: 0 12px 40px -12px rgba(16, 24, 40, 0.18);
+
+  /* ---- Signature page backdrop ---- */
+  --backdrop-glow: radial-gradient(120% 60% at 50% -10%, rgba(79, 70, 229, 0.05), transparent 60%);
+  --backdrop-wash: linear-gradient(180deg, var(--ta-page-top) 0%, var(--ta-page) 40%);
+  --backdrop-page: var(--backdrop-glow), var(--backdrop-wash);
+
+  /* ---- Glass header / scrim ---- */
+  --header-bg: rgba(255, 255, 255, 0.85);
+  --header-blur: blur(8px);
+  --scrim: rgba(0, 0, 0, 0.45);
+  --scrim-soft: rgba(0, 0, 0, 0.3);
+
+  /* ---- Motion ---- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: ease;
+  --dur-fast: 160ms;
+  --dur-base: 200ms;
+  --dur-slow: 1400ms;
 }
 
 html {
-  /* 极淡的双色渐变 + 顶部柔光，给纯色背景一点深度 */
-  background:
-    radial-gradient(120% 60% at 50% -10%, rgba(79, 70, 229, 0.05), transparent 60%),
-    linear-gradient(180deg, #fbfbfd 0%, var(--page-bg) 40%);
+  /* 签名背景：淡 indigo 顶部光晕 + 近白→页底的竖向渐变，固定不滚动 */
+  background: var(--backdrop-page);
   background-attachment: fixed;
 }
 
 body {
   @apply antialiased min-h-screen flex flex-col;
-  color: var(--ink);
+  color: var(--text-strong);
   background: transparent;
-  font-family: var(--font-inter), "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  font-feature-settings: "cv02", "cv03", "cv04", "ss01";
-  letter-spacing: -0.006em;
+  font-family: var(--font-sans);
+  font-feature-settings: var(--font-feature-sans);
+  letter-spacing: var(--tracking-body);
 }
 
+/* =========================================================================
+   App chrome helpers
+   ========================================================================= */
 .header {
   @apply sticky top-0 z-50 flex flex-wrap items-center justify-between gap-3 px-4 py-3 md:px-8 md:py-4;
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--ink);
-  border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(8px);
+  background: var(--header-bg);
+  color: var(--text-strong);
+  border-bottom: 1px solid var(--ta-line);
+  -webkit-backdrop-filter: var(--header-blur);
+  backdrop-filter: var(--header-blur);
 }
 
 .header h1 a {
   @apply no-underline font-semibold tracking-tight text-[15px] md:text-base;
-  color: var(--ink);
+  color: var(--text-strong);
 }
 
 .header nav {
   @apply flex items-center gap-4 text-sm font-medium;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .header nav a:hover,
 .header nav a.active {
-  color: var(--accent);
+  color: var(--text-accent);
 }
 
 .main {
-  @apply flex-1 p-4 md:p-6 max-w-6xl mx-auto w-full;
+  @apply flex-1 p-4 md:p-6 mx-auto w-full;
+  max-width: var(--content-max);
 }
 
 .footer {
   @apply px-4 pb-6 pt-3 text-center text-xs;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
-@keyframes message-enter {
+/* The wide-tracked uppercase micro-label used everywhere. */
+.ta-eyebrow {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow-wide);
+  color: var(--text-muted);
+  font-weight: var(--weight-medium);
+}
+
+/* =========================================================================
+   Motion
+   ========================================================================= */
+@keyframes ta-message-enter {
   from {
     opacity: 0;
     transform: translateY(8px);
@@ -76,15 +239,7 @@ body {
   }
 }
 
-.message-enter {
-  animation: message-enter 200ms ease-out;
-}
-
-.status-pulse {
-  animation: status-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes status-pulse {
+@keyframes ta-status-pulse {
   0%, 100% {
     transform: scale(0.9);
     opacity: 0.45;
@@ -95,12 +250,61 @@ body {
   }
 }
 
+/* Canonical names + back-compat aliases used by existing markup. */
+.ta-animate-enter,
+.message-enter {
+  animation: ta-message-enter var(--dur-base) var(--ease-out);
+}
+
+.ta-animate-pulse,
+.status-pulse {
+  animation: ta-status-pulse var(--dur-slow) ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ta-animate-enter,
+  .message-enter,
+  .ta-animate-pulse,
+  .status-pulse {
+    animation: none;
+  }
+}
+
 .conversation-card {
   transition:
-    box-shadow 160ms ease,
-    border-color 160ms ease,
-    background-color 160ms ease;
+    box-shadow var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    background-color var(--dur-fast) ease;
 }
+
+/* =========================================================================
+   Form fields — token-driven base + focus ring (design radius-md inputs)
+   ========================================================================= */
+.ta-field {
+  width: 100%;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--ta-line);
+  background: var(--ta-panel);
+  padding: 0.75rem 1rem;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--ta-ink);
+  outline: none;
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+.ta-field::placeholder { color: var(--ta-faint); }
+.ta-field:focus,
+.ta-field:focus-visible {
+  border-color: var(--ta-accent);
+  box-shadow: 0 0 0 3px var(--ta-accent-ring);
+}
+.ta-field:disabled { opacity: 0.6; cursor: not-allowed; }
+.ta-field-sm {
+  border-radius: var(--radius-sm);
+  padding: 0.375rem 0.5rem;
+  font-size: var(--text-xs);
+}
+.ta-field-mono { font-family: var(--font-mono); }
 
 /* 自定义下拉：去掉原生外观，加一个统一的小箭头 */
 .select-clean {
@@ -113,32 +317,40 @@ body {
   padding-right: 2rem;
   cursor: pointer;
 }
-.select-clean:hover { border-color: #d1d5db; }
+.select-clean:hover {
+  border-color: #d1d5db;
+}
 
-/* 聊天区 markdown 渲染（紧凑、克制、像产品而不是文档） */
-.chat-md { @apply text-sm leading-7 text-[#1f2937]; }
+/* =========================================================================
+   Chat markdown — 紧凑、克制，像产品而不是文档
+   ========================================================================= */
+.chat-md {
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--ta-ink-soft);
+}
 .chat-md > :first-child { margin-top: 0; }
 .chat-md > :last-child { margin-bottom: 0; }
 .chat-md p { @apply my-2; }
-.chat-md strong { @apply font-semibold text-[#111827]; }
-.chat-md a { @apply text-[#4f46e5] underline underline-offset-2; }
+.chat-md strong { font-weight: var(--weight-semibold); color: var(--text-strong); }
+.chat-md a { color: var(--text-accent); text-decoration: underline; text-underline-offset: 2px; }
 .chat-md ul { @apply my-2 list-disc space-y-1 pl-5; }
 .chat-md ol { @apply my-2 list-decimal space-y-1 pl-5; }
-.chat-md h1 { @apply mt-4 mb-2 text-base font-semibold text-[#111827]; }
-.chat-md h2 { @apply mt-4 mb-2 text-[15px] font-semibold text-[#111827]; }
-.chat-md h3 { @apply mt-3 mb-1.5 text-sm font-semibold text-[#111827]; }
-.chat-md hr { @apply my-3 border-[#eceef1]; }
-.chat-md blockquote { @apply my-2 border-l-2 border-[#e0e7ff] pl-3 text-[#4b5563]; }
-.chat-md code { @apply rounded-md bg-[#eef2ff] px-1.5 py-0.5 font-mono text-[12.5px] text-[#4338ca]; }
-.chat-md pre { @apply my-3 overflow-x-auto rounded-xl bg-[#0f172a] p-3.5 text-[12.5px] leading-6; }
-.chat-md pre code { @apply block bg-transparent p-0 text-[#e2e8f0]; }
+.chat-md h1 { @apply mt-4 mb-2 text-base font-semibold; color: var(--text-strong); }
+.chat-md h2 { @apply mt-4 mb-2 text-[15px] font-semibold; color: var(--text-strong); }
+.chat-md h3 { @apply mt-3 mb-1.5 text-sm font-semibold; color: var(--text-strong); }
+.chat-md hr { @apply my-3; border-color: var(--ta-line-soft); }
+.chat-md blockquote { @apply my-2 pl-3; border-left: 2px solid var(--ta-accent-soft); color: #4b5563; }
+.chat-md code { @apply rounded-md px-1.5 py-0.5 font-mono text-[12.5px]; background: var(--ta-accent-soft); color: var(--ta-accent-hover); }
+.chat-md pre { @apply my-3 overflow-x-auto rounded-xl p-3.5 text-[12.5px] leading-6; background: var(--ta-code-bg); }
+.chat-md pre code { @apply block bg-transparent p-0; color: var(--ta-code-fg); }
 .chat-md table { @apply my-3 block w-full overflow-x-auto border-separate border-spacing-0 text-[13px]; }
-.chat-md thead { @apply bg-[#f8f9fb]; }
-.chat-md th { @apply border-b border-[#e5e7eb] px-3 py-2 text-left font-semibold text-[#374151]; }
-.chat-md td { @apply border-b border-[#f1f2f4] px-3 py-2 align-top text-[#4b5563]; }
-.chat-md tr:last-child td { @apply border-b-0; }
+.chat-md thead { background: #f8f9fb; }
+.chat-md th { @apply px-3 py-2 text-left font-semibold; border-bottom: 1px solid var(--ta-line); color: var(--ta-ink-soft); }
+.chat-md td { @apply px-3 py-2 align-top; border-bottom: 1px solid #f1f2f4; color: #4b5563; }
+.chat-md tr:last-child td { border-bottom: 0; }
 
 /* 暗色气泡里的 markdown（用户消息） */
-.chat-md-dark { @apply text-sm leading-7 text-white/95; }
-.chat-md-dark code { @apply rounded bg-white/15 px-1.5 py-0.5 font-mono text-[12.5px] text-white; }
-.chat-md-dark a { @apply text-white underline; }
+.chat-md-dark { font-size: var(--text-sm); line-height: var(--leading-relaxed); color: rgba(255, 255, 255, 0.95); }
+.chat-md-dark code { @apply rounded px-1.5 py-0.5 font-mono text-[12.5px]; background: rgba(255, 255, 255, 0.15); color: #fff; }
+.chat-md-dark a { color: #fff; text-decoration: underline; }

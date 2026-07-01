@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.authtoken.models import Token
 
-from .models import BrokerClientCredential
+from .models import BrokerClientCredential, BrokerClientToken
 
 
 class RegisterView(APIView):
@@ -102,7 +102,10 @@ class ClientLoginView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
         user = cred.user
-        token, _ = Token.objects.get_or_create(user=user)
+        # 签发该凭证专属的 broker Token（最小授权），而非用户的「主」Web Token。
+        # 旋转：每次登录重置 key，旧 broker Token 失效；删除凭证则级联吊销。
+        BrokerClientToken.objects.filter(credential=cred).delete()
+        token = BrokerClientToken.objects.create(credential=cred)
         return Response(
             {"token": token.key, "user_id": user.id, "email": getattr(user, "email", user.username) or ""},
         )

@@ -60,7 +60,7 @@ source .env 2>/dev/null || true
 set +a
 if [ -n "$DATA_PREFIX" ]; then
   print_info "创建数据目录: $DATA_PREFIX"
-  mkdir -p "$DATA_PREFIX/logs/TeleAgent" "$DATA_PREFIX/staticfiles" "$DATA_PREFIX/postgres/data" "$DATA_PREFIX/postgres/backup"
+  mkdir -p "$DATA_PREFIX/logs/TeleAgent" "$DATA_PREFIX/staticfiles" "$DATA_PREFIX/media/TeleAgent" "$DATA_PREFIX/postgres/data" "$DATA_PREFIX/postgres/backup"
 fi
 
 SSL_DIR="$(pwd)/compose/nginx/ssl"

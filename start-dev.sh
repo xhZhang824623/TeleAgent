@@ -49,6 +49,17 @@ check_docker() {
     print_success "Docker 正在运行"
 }
 
+# 创建 bind-mount 数据目录（compose 的 volumes 用 o:bind，宿主目录必须先存在，否则挂载失败）
+ensure_data_dirs() {
+    set -a
+    source .env 2>/dev/null || true
+    set +a
+    if [ -n "$DATA_PREFIX" ]; then
+        print_info "创建数据目录: $DATA_PREFIX"
+        mkdir -p "$DATA_PREFIX/logs/TeleAgent" "$DATA_PREFIX/staticfiles" "$DATA_PREFIX/media/TeleAgent" "$DATA_PREFIX/postgres/data" "$DATA_PREFIX/postgres/backup"
+    fi
+}
+
 # 无域名/无证书时：自动生成自签名证书（HTTPS 可用，浏览器会提示不安全）
 ensure_ssl_certs() {
     SSL_DIR="$(pwd)/compose/nginx/ssl"
@@ -97,6 +108,7 @@ main() {
     print_info "检查环境..."
     check_conflict_env
     check_docker
+    ensure_data_dirs
     ensure_ssl_certs
     detect_build_network
 

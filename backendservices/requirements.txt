@@ -2,3 +2,7 @@ Django>=4.2,<6
 djangorestframework>=3.14
 psycopg2-binary>=2.9
 gunicorn>=22.0
+# SSE 长连接需要协作式 IO：gevent worker 让单进程承载大量并发流；
+# psycogreen 让 psycopg2 在 gevent 下不阻塞事件循环。
+gevent>=24.2
+psycogreen>=1.0.2

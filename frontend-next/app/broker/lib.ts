@@ -24,12 +24,41 @@ export type Conversation = {
   force?: boolean;
 };
 export type Task = { id: string; status: string; started_at?: string; result_text?: string; agent_type?: AgentType };
-export type Message = { id: string; prompt: string; task?: Task };
+export type Message = { id: string; prompt: string; task?: Task; created_at?: string };
 export type LiveLine = { id: string; tone: "assistant" | "tool" | "system" | "result"; text: string };
-export type LiveTask = { status: string; lines: LiveLine[]; resultText?: string };
+export type PermissionCard = {
+  id: string;
+  tool_name: string;
+  tool_input?: Record<string, unknown>;
+  status: "pending" | "allowed" | "denied";
+  created_at?: string;
+};
+export type LiveTask = { status: string; lines: LiveLine[]; resultText?: string; permissions?: PermissionCard[] };
+
+export type FileTransfer = {
+  id: string;
+  filename: string;
+  size: number;
+  status: "pending" | "ready" | "failed";
+  agent_initiated?: boolean;
+  created_at?: string;
+};
 
 export const TOKEN_KEY = "broker_token";
 export const EMAIL_KEY = "broker_email";
+
+// 字节 → 可读大小（B/KB/MB/GB）。
+export function formatBytes(n?: number): string {
+  if (!n || n < 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
 
 // 声明式 Agent 参数 schema（前端渲染侧）。每个 agent 一组下拉控件；
 // 选中的值存进 conversation.options(JSON)，由 LocalBroker 映射成 CLI flag。
@@ -167,6 +196,26 @@ export function statusTone(status?: string): string {
   }
 }
 
+// 把工具审批请求的 input 浓缩成可读摘要（命令 / 路径 / 否则 JSON）。统一截断，避免
+// 整段文件内容/超长命令撑爆卡片布局。
+const PERMISSION_SUMMARY_MAX = 800;
+export function permissionSummary(input?: Record<string, unknown>): string {
+  if (!input) return "";
+  let s: string;
+  const cmd = input.command ?? input.cmd;
+  const path = input.path ?? input.file_path ?? input.filePath;
+  if (typeof cmd === "string") s = cmd;
+  else if (typeof path === "string") s = path;
+  else {
+    try {
+      s = JSON.stringify(input);
+    } catch {
+      return "";
+    }
+  }
+  return s.length > PERMISSION_SUMMARY_MAX ? s.slice(0, PERMISSION_SUMMARY_MAX) + "…" : s;
+}
+
 export function shortPathLabel(path?: string): string {
   if (!path) return "未命名目录";
   const parts = path.split("/").filter(Boolean);
@@ -188,6 +237,19 @@ export function lineToneLabel(tone: LiveLine["tone"]): string {
   }
 }
 
+// 紧凑的绝对时间（如「6/29 17:29」）。用于消息/卡片的时间戳。
+export function formatTime(value?: string): string {
+  if (!value) return "";
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return "";
+  return new Date(ts).toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function formatRelativeTime(value?: string): string {
   if (!value) return "刚创建";
   const ts = new Date(value).getTime();
@@ -197,6 +259,24 @@ export function formatRelativeTime(value?: string): string {
   if (diff < 3_600_000) return `${Math.max(1, Math.floor(diff / 60_000))} 分钟前`;
   if (diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
   return `${Math.max(1, Math.floor(diff / 86_400_000))} 天前`;
+}
+
+// 统一的"显示用"任务状态：消息气泡、侧栏、工作台头共用一个真相源，避免出现
+// 侧栏"执行中"而气泡"排队中"这种不一致。优先级：
+//   1) 实时流(live)已到终态(success/failed/...) → 用它
+//   2) 服务端 task 已是终态 → 用服务端
+//   3) 实时流已经有事件行 → 说明设备已接手，算"执行中"
+//   4) 否则信服务端的 queued/running（刚发出、设备还没接手时就是 queued）
+// 注意：不要直接用 live.status —— 它在轮询开始时被乐观地初始化成 "running"。
+export function taskDisplayStatus(
+  taskStatus?: string,
+  live?: { status?: string; lines?: unknown[] } | null
+): string {
+  const terminal = ["success", "failed", "cancelled", "timeout"];
+  if (live?.status && terminal.includes(live.status)) return live.status;
+  if (taskStatus && terminal.includes(taskStatus)) return taskStatus;
+  if (live?.lines && live.lines.length > 0) return "running";
+  return taskStatus || "queued";
 }
 
 export function conversationStatusDot(status?: string): string {

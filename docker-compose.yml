@@ -81,6 +81,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_HOST=DbTeleAgent
       - STATIC_ROOT=/app/staticfiles
+      - MEDIA_ROOT=/app/media
       - LOG_MAX_SIZE=${LOG_MAX_SIZE}
       - LOG_BACKUP_COUNT=${LOG_BACKUP_COUNT}
       - LOG_FORMAT=${LOG_FORMAT}
@@ -93,6 +94,31 @@ services:
       - "127.0.0.1:${DJANGO_PORT:-9001}:9001"
     volumes:
       - static_volume:/app/staticfiles
+      - media_volume:/app/media
+      - logs_volume:/app/logs
+    networks:
+      - network
+
+  # 过期任务回收：权威地回收心跳超时的 RUNNING 任务，不依赖某台 client 是否在轮询。
+  TeleAgentReaper:
+    image: djangoapps:latest
+    container_name: TeleAgentReaper
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=DbTeleAgent
+      - MEDIA_ROOT=/app/media
+    depends_on:
+      DbTeleAgent:
+        condition: service_healthy
+    # 回收过期任务（30s）+ 清理过期文件传输（1h），共用一个 sidecar 容器。
+    command: ["sh", "-c", "python manage.py purge_expired_transfers --loop --interval 3600 & exec python manage.py reap_stale_tasks --loop --interval 30"]
+    volumes:
+      - media_volume:/app/media
       - logs_volume:/app/logs
     networks:
       - network
@@ -116,6 +142,12 @@ volumes:
       type: none
       o: bind
       device: ${DATA_PREFIX}/staticfiles
+  media_volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PREFIX}/media/TeleAgent
   pgdata:
     driver: local
     driver_opts:

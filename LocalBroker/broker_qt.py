@@ -40,16 +40,74 @@ log = logging.getLogger("teleagent.broker")
 
 
 def _setup_logging() -> None:
-    """配置 Broker 的结构化日志（幂等）。级别由 BROKER_LOG_LEVEL 控制，默认 INFO。"""
+    """配置 Broker 的结构化日志（幂等）。级别由 BROKER_LOG_LEVEL 控制，默认 INFO。
+
+    同时输出到：
+      1) stderr —— 前台可见，作为服务时由 systemd 收进 journald；
+      2) 滚动日志文件 —— 默认 ~/.local/state/teleagent/broker.log。
+         可用 BROKER_LOG_FILE 覆盖路径（设为空或 "-" 关闭落盘）；
+         BROKER_LOG_MAX_BYTES（默认 10MB）与 BROKER_LOG_BACKUP_COUNT（默认 5）控制轮转。
+    落盘失败（无权限/磁盘满等）不阻止 Broker 运行，仅降级为 stderr。
+    """
     if log.handlers:
         return
     level = getattr(logging, os.environ.get("BROKER_LOG_LEVEL", "INFO").upper(), logging.INFO)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%H:%M:%S"))
-    log.addHandler(handler)
     log.setLevel(level)
     log.propagate = False
+
+    # 1) 控制台 / journald：短时间戳即可。
+    stream = logging.StreamHandler(sys.stderr)
+    stream.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%H:%M:%S"))
+    log.addHandler(stream)
+
+    # 2) 落盘：滚动日志文件（含完整日期，便于跨天回溯）。
+    default_log = os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+        "teleagent", "broker.log",
+    )
+    log_path = os.environ.get("BROKER_LOG_FILE", default_log)
+    if log_path and log_path != "-":
+        try:
+            from logging.handlers import RotatingFileHandler
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            max_bytes = int(os.environ.get("BROKER_LOG_MAX_BYTES", str(10 * 1024 * 1024)) or 0)
+            backups = int(os.environ.get("BROKER_LOG_BACKUP_COUNT", "5") or 0)
+            file_handler = RotatingFileHandler(
+                log_path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+            file_handler.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+            log.addHandler(file_handler)
+            log.info("日志落盘：%s（maxBytes=%d, backups=%d）", log_path, max_bytes, backups)
+        except Exception as exc:  # noqa: BLE001 — 落盘失败不应阻止 Broker 启动
+            log.warning("无法写日志文件 %s（%s），仅输出到 stderr。", log_path, exc)
+
+
+# ──────────────────────────────────────────────────────────── single-instance lock
+
+# 单实例锁：GUI 版与服务版共用同一把锁文件，保证两者不会同时运行（避免重复拉取/执行任务）。
+_INSTANCE_LOCK_PATH = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.cache"),
+    "teleagent-broker.lock",
+)
+_instance_lock_handle = None  # 保持引用，进程存活期间不释放锁（关闭/退出时由 OS 自动释放）
+
+
+def acquire_single_instance_lock():
+    """获取单实例文件锁（fcntl.flock，非阻塞）。成功返回锁文件对象并保存引用；已被占用返回 None。"""
+    global _instance_lock_handle
+    import fcntl
+    os.makedirs(os.path.dirname(_INSTANCE_LOCK_PATH), exist_ok=True)
+    fh = open(_INSTANCE_LOCK_PATH, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    fh.write(str(os.getpid()))
+    fh.flush()
+    _instance_lock_handle = fh
+    return fh
 
 
 # ──────────────────────────────────────────────────────────── theme
@@ -700,10 +758,22 @@ class CloudBrokerWindow(QWidget):
 
 def main():
     _setup_logging()
+    log.info("启动模式：桌面 GUI（broker_qt）")
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setApplicationName("TeleAgent Broker")
     app.setStyleSheet(APP_QSS)
+
+    # 与后台服务互斥：若服务（或另一个 GUI）已在运行，提示并退出，避免重复执行任务。
+    if acquire_single_instance_lock() is None:
+        QMessageBox.critical(
+            None, "已在运行",
+            "已有另一个 TeleAgent Broker 实例（桌面版或后台服务）正在运行。\n\n"
+            "同一时间只能运行一个，以免重复拉取/执行任务。\n"
+            "若是后台服务占用，可先停止它：\n    systemctl --user stop teleagent-broker",
+        )
+        log.warning("检测到已有实例在运行，桌面版退出。")
+        sys.exit(1)
 
     conn = CloudConnectDialog()
     if conn.exec_() != QDialog.Accepted:

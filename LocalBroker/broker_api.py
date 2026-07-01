@@ -15,6 +15,18 @@ from typing import Any, Dict, List, Optional
 DEFAULT_BASE = os.environ.get("BROKER_API_BASE", "http://localhost:9020")
 API_PATH = "/api/broker"
 
+# TLS 证书校验策略：localhost 自签名恒跳过；对外部自签名 HTTPS（如自建服务器用自签证书），
+# 可设 BROKER_INSECURE_SSL=1 显式放行——数据仍加密传输，只是不校验证书。上正式证书后请勿开启。
+_INSECURE_SSL = os.environ.get("BROKER_INSECURE_SSL", "").strip().lower() in ("1", "true", "yes")
+
+
+def _ssl_context(base: str) -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    if base.startswith("https://") and ("localhost" in base or _INSECURE_SSL):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
 
 class AuthError(RuntimeError):
     """Raised when the Broker API rejects the current token/credentials."""
@@ -46,10 +58,7 @@ def _req(
     req = urllib.request.Request(
         url, data=data, method=method, headers=headers if headers else {}
     )
-    ctx = ssl.create_default_context()
-    if base.startswith("https://") and "localhost" in base:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    ctx = _ssl_context(base)
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             raw = r.read().decode("utf-8")
@@ -81,10 +90,7 @@ def _auth_req(method: str, path: str, body: Optional[Dict], base: str) -> Dict:
     data = json.dumps(body).encode("utf-8") if body else None
     headers = {"Content-Type": "application/json"} if data else {}
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    ctx = ssl.create_default_context()
-    if base.startswith("https://") and "localhost" in base:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    ctx = _ssl_context(base)
     try:
         with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
             raw = r.read().decode("utf-8")

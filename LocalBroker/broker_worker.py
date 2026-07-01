@@ -6,6 +6,7 @@ broker_worker.py – 与 Django 对接的 Broker 执行逻辑：拉取 queued �
 
 import base64
 import json
+import logging
 import mimetypes
 import os
 import subprocess
@@ -15,6 +16,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Tuple
+
+# 与 broker_qt / broker_service 共用同一 logger 层级（teleagent.broker），因此也共用同一份落盘日志。
+log = logging.getLogger("teleagent.broker")
 
 try:
     from LocalBroker.broker_api import (
@@ -681,8 +685,12 @@ def apply_pending_fs_requests(
                 "listed_path": listed_path, "parent_path": parent_path,
                 "entries": entries, "error": "",
             }
+            log.info("列目录 [%s]（含文件=%s，root=%s）→ %d 项",
+                     listed_path, bool(r.get("include_files")),
+                     r.get("root_path") or "(无限制)", len(entries))
         except Exception as exc:
             status, kwargs = "failed", {"error": str(exc)[:500]}
+            log.warning("列目录失败 [%s]：%s", r.get("path") or "~", exc)
         try:
             _call_with_retry(
                 ack_fs_request_fn, rid, status=status, base=base, token=token, attempts=2, **kwargs,
@@ -750,10 +758,11 @@ def apply_pending_file_transfers(
         tid = str(t.get("id"))
         path = t.get("source_path") or ""
         try:
-            filename, content_type, content_b64, _size = read_file_b64(
+            filename, content_type, content_b64, size = read_file_b64(
                 path, max_bytes, root=t.get("root_path") or None,
             )
         except Exception as exc:
+            log.warning("文件下载失败 [%s]：%s", path, exc)
             try:
                 _call_with_retry(fail_file_transfer_fn, tid, error=str(exc)[:500],
                                  base=base, token=token, attempts=2)
@@ -766,8 +775,9 @@ def apply_pending_file_transfers(
                 content_b64=content_b64, content_type=content_type,
                 base=base, token=token, attempts=2,
             )
+            log.info("文件下载 [%s]（%s，%d 字节）已上传中转", filename, path, size)
         except Exception:
-            pass  # 网络失败：留作 pending，下轮重试
+            log.warning("文件下载 [%s] 上传中转失败，将下轮重试", filename)  # 网络失败：留作 pending
 
 
 def make_permission_gateway(

@@ -9,6 +9,10 @@ venv/
 node_modules/
 .next/
 out/
+*.tsbuildinfo
+
+# 工具产物（Playwright MCP 截图/快照等）
+.playwright-mcp/
 
 # OS / IDE
 .DS_Store
@@ -19,3 +23,6 @@ out/
 # 部署产物（大文件，不入库）
 build/
 *.tar.gz
+
+# 本地开发数据库（仅 dev 兜底用 SQLite，不入库）
+*.sqlite3

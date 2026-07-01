@@ -1,8 +1,105 @@
 from rest_framework import serializers
 from .models import (
     AGENT_TYPE_CHOICES, AgentClient, BrokerClientCredential, Conversation, Task, Message,
-    ConversationControl,
+    ConversationControl, FsBrowseRequest, PermissionRequest, FileTransfer,
 )
+
+
+class FileTransferSerializer(serializers.ModelSerializer):
+    client_id = serializers.SerializerMethodField()
+    conversation_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FileTransfer
+        fields = [
+            "id", "client_id", "conversation_id", "source_path", "root_path", "filename",
+            "size", "content_type", "status", "agent_initiated", "error",
+            "created_at", "ready_at",
+        ]
+        read_only_fields = fields
+
+    def get_client_id(self, obj):
+        return str(obj.client_id)
+
+    def get_conversation_id(self, obj):
+        return str(obj.conversation_id) if obj.conversation_id else None
+
+
+class FileTransferRequestSerializer(serializers.Serializer):
+    client_id = serializers.UUIDField()
+    conversation_id = serializers.UUIDField(required=False, allow_null=True)
+    path = serializers.CharField(max_length=4096)
+    agent_initiated = serializers.BooleanField(required=False, default=False)
+
+
+class FileTransferUploadSerializer(serializers.Serializer):
+    filename = serializers.CharField(max_length=512)
+    content_type = serializers.CharField(max_length=128, allow_blank=True, required=False, default="")
+    content_b64 = serializers.CharField()
+
+
+class PermissionRequestSerializer(serializers.ModelSerializer):
+    conversation_id = serializers.SerializerMethodField()
+    task_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PermissionRequest
+        fields = [
+            "id", "conversation_id", "task_id", "request_id",
+            "tool_name", "tool_input", "status", "remember", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_conversation_id(self, obj):
+        return str(obj.conversation_id)
+
+    def get_task_id(self, obj):
+        return str(obj.task_id) if obj.task_id else None
+
+
+class PermissionRequestCreateSerializer(serializers.Serializer):
+    conversation_id = serializers.UUIDField()
+    task_id = serializers.UUIDField(required=False, allow_null=True)
+    request_id = serializers.CharField(max_length=128, allow_blank=True, required=False, default="")
+    tool_name = serializers.CharField(max_length=128)
+    tool_input = serializers.DictField(required=False, default=dict)
+
+
+class PermissionAnswerSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=["allow", "deny"])
+    remember = serializers.BooleanField(required=False, default=False)
+
+
+class FsBrowseRequestSerializer(serializers.ModelSerializer):
+    client_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FsBrowseRequest
+        fields = [
+            "id", "client_id", "path", "include_files", "root_path", "status",
+            "listed_path", "parent_path", "entries", "error", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_client_id(self, obj):
+        return str(obj.client_id)
+
+
+class FsBrowseCreateSerializer(serializers.Serializer):
+    client_id = serializers.UUIDField()
+    path = serializers.CharField(max_length=4096, allow_blank=True, required=False, default="")
+    include_files = serializers.BooleanField(required=False, default=False)
+    # 指定后，root_path 由服务端从该会话 cwd 派生，浏览被约束在 cwd 子树内。
+    conversation_id = serializers.UUIDField(required=False, allow_null=True)
+
+
+class FsBrowseAckSerializer(serializers.Serializer):
+    """LocalBroker 回传列目录结果。"""
+    status = serializers.ChoiceField(choices=[FsBrowseRequest.Status.DONE, FsBrowseRequest.Status.FAILED])
+    listed_path = serializers.CharField(max_length=4096, allow_blank=True, required=False, default="")
+    parent_path = serializers.CharField(max_length=4096, allow_null=True, required=False, allow_blank=True)
+    entries = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+    error = serializers.CharField(allow_blank=True, required=False, default="")
 
 
 class ConversationControlSerializer(serializers.ModelSerializer):

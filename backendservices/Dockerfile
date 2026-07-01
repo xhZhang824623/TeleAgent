@@ -21,4 +21,6 @@ WORKDIR /app/TeleAgent
 ENV DJANGO_SETTINGS_MODULE=TeleAgent.settings
 EXPOSE 9001
 
-CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py collectstatic --noinput --clear || true && exec gunicorn TeleAgent.wsgi:application -b 0.0.0.0:9001 -w ${GUNICORN_WORKERS:-2} -k ${GUNICORN_WORKER_CLASS:-sync} --timeout ${GUNICORN_TIMEOUT:-30} --access-logfile - --error-logfile -"]
+# 配置集中在 gunicorn.conf.py（默认 gevent worker，承载 SSE 长连接）；
+# 仍可用 GUNICORN_* 环境变量覆盖各项。
+CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py collectstatic --noinput --clear || true && exec gunicorn TeleAgent.wsgi:application -c /app/TeleAgent/gunicorn.conf.py"]

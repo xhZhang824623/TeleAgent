@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { Card, Eyebrow, Badge, Button, Input } from "../components/ui";
 
 const API_BROKER = "/api/broker";
 const TOKEN_KEY = "broker_token";
@@ -54,9 +55,10 @@ export default function CredentialPage() {
   }
 
   async function loadCredentials(currentToken?: string) {
+    const authToken = currentToken ?? token ?? getStoredToken();
     try {
       const response = await fetch(`${API_BROKER}/credentials/`, {
-        headers: currentToken ? { Authorization: `Token ${currentToken}` } : {},
+        headers: authToken ? { Authorization: `Token ${authToken}` } : {},
       });
       if (!response.ok) throw new Error(await response.text());
       setCredentials(await response.json());
@@ -87,19 +89,16 @@ export default function CredentialPage() {
   }
 
   if (!loaded) {
-    return <div className="min-h-screen flex items-center justify-center">Loading…</div>;
+    return <div className="min-h-screen flex items-center justify-center text-sm text-muted">Loading…</div>;
   }
 
   if (!token) {
     return (
       <div className="min-h-screen flex items-center justify-center px-6">
-        <div className="rounded-2xl border border-[#e5e7eb] bg-[#ffffff] px-8 py-7 text-center shadow-sm">
-          <h1 className="text-2xl font-semibold text-[#111827]">请先登录 TeleAgent</h1>
-          <p className="mt-3 text-sm text-[#6b7280]">这个页面用于生成 LocalBroker 登录凭证。</p>
-          <Link
-            href="/broker"
-            className="mt-5 inline-flex rounded-full bg-[#4f46e5] px-5 py-2.5 text-sm font-medium text-white"
-          >
+        <div className="rounded-card border border-line-soft bg-panel px-8 py-7 text-center shadow-soft">
+          <h1 className="text-2xl font-semibold text-ink">请先登录 TeleAgent</h1>
+          <p className="mt-3 text-sm text-muted">这个页面用于生成 LocalBroker 登录凭证。</p>
+          <Link href="/broker" className="mt-5 inline-flex rounded-pill bg-accent px-5 py-2.5 text-sm font-medium text-white transition hover:bg-accent-hover">
             前往主界面
           </Link>
         </div>
@@ -119,113 +118,88 @@ export default function CredentialPage() {
 
       <main className="main">
         <div className="mx-auto max-w-4xl space-y-4">
-          <section className="rounded-2xl border border-[#e5e7eb] bg-[#ffffff] p-5 shadow-sm">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-[#6b7280]">Credential Studio</div>
-            <h2 className="mt-2 text-3xl font-semibold text-[#111827]">生成 LocalBroker 登录凭证</h2>
-            <p className="mt-3 text-sm leading-7 text-[#6b7280]">
-              创建后会返回一个自动生成的 UUID 和 `secret_key`。<strong>secret_key 仅在创建时显示一次、不会保存在服务端</strong>，请立即复制保存；UUID 之后可随时查看。
+          <Card>
+            <Eyebrow>Credential Studio</Eyebrow>
+            <h2 className="mt-2 text-3xl font-semibold text-ink">生成 LocalBroker 登录凭证</h2>
+            <p className="mt-3 text-sm leading-7 text-muted">
+              创建后会返回一个自动生成的 UUID 和 <code className="font-mono">secret_key</code>。<strong className="text-ink-soft">secret_key 仅在创建时显示一次、不会保存在服务端</strong>，请立即复制保存；UUID 之后可随时查看。
             </p>
-          </section>
+          </Card>
 
           <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-            <section className="rounded-2xl border border-[#e5e7eb] bg-[#ffffff] p-5 shadow-sm">
-              <div className="text-[11px] uppercase tracking-[0.24em] text-[#6b7280]">Create</div>
-              <h3 className="mt-2 text-xl font-semibold text-[#111827]">新建设备凭证</h3>
+            <Card>
+              <Eyebrow>Create</Eyebrow>
+              <h3 className="mt-2 text-xl font-semibold text-ink">新建设备凭证</h3>
               <form onSubmit={createCredential} className="mt-5 space-y-4">
-                <label className="block">
-                  <span className="text-sm font-medium text-[#374151]">设备名称</span>
-                  <input
-                    type="text"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="例如：Office Mac mini"
-                    className="mt-1 block w-full rounded-2xl border border-[#e5e7eb] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#4f46e5] focus:ring-2 focus:ring-[#4f46e5]/15"
-                    required
-                  />
-                </label>
-                {error && <div className="rounded-2xl bg-[#fef2f2] px-4 py-3 text-sm text-[#b91c1c]">{error}</div>}
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="inline-flex rounded-full bg-[#4f46e5] px-5 py-2.5 text-sm font-medium text-white transition hover:bg-[#4338ca] disabled:opacity-50"
-                >
+                <Input
+                  label="设备名称"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="例如：Office Mac mini"
+                  required
+                />
+                {error && <div className="max-h-40 overflow-auto rounded-field bg-failed-bg px-4 py-3 text-sm text-failed-fg break-words">{error}</div>}
+                <Button type="submit" variant="accent" disabled={loading}>
                   {loading ? "生成中…" : "生成凭证"}
-                </button>
+                </Button>
               </form>
-            </section>
+            </Card>
 
-            <section className="rounded-2xl border border-[#e5e7eb] bg-[#ffffff] p-5 shadow-sm">
-              <div className="text-[11px] uppercase tracking-[0.24em] text-[#6b7280]">Latest</div>
-              <h3 className="mt-2 text-xl font-semibold text-[#111827]">最新生成结果</h3>
+            <Card>
+              <Eyebrow>Latest</Eyebrow>
+              <h3 className="mt-2 text-xl font-semibold text-ink">最新生成结果</h3>
               {latest ? (
-                <div className="mt-5 rounded-xl border border-[#e5e7eb] bg-[#f9fafb] p-4">
-                  <div className="space-y-3 text-sm text-[#374151]">
+                <div className="mt-5 rounded-field border border-line bg-surface p-4">
+                  <div className="space-y-3 text-sm text-ink-soft">
                     <div>
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-[#9ca3af]">UUID</div>
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-faint">UUID</div>
                       <div className="mt-1 break-all font-mono">{latest.id}</div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-[#9ca3af]">Name</div>
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-faint">Name</div>
                       <div className="mt-1">{latest.name}</div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-[#9ca3af]">Secret Key</div>
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-faint">Secret Key</div>
                       <div className="mt-1 break-all font-mono">{latest.secret_key}</div>
                     </div>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => copyText(latest.id)}
-                      className="rounded-full border border-[#e5e7eb] px-4 py-2 text-sm text-[#4b5563] transition hover:bg-[#f3f4f6]"
-                    >
-                      复制 UUID
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => copyText(latest.secret_key || "")}
-                      className="rounded-full border border-[#e5e7eb] px-4 py-2 text-sm text-[#4b5563] transition hover:bg-[#f3f4f6]"
-                    >
-                      复制 Secret
-                    </button>
+                    <Button variant="secondary" size="sm" onClick={() => copyText(latest.id)}>复制 UUID</Button>
+                    <Button variant="secondary" size="sm" onClick={() => copyText(latest.secret_key || "")}>复制 Secret</Button>
                   </div>
-                  <p className="mt-4 text-xs leading-6 text-[#b91c1c]">
+                  <p className="mt-4 text-xs leading-6 text-failed-fg">
                     ⚠️ 请立即复制保存：secret_key 仅此一次显示，服务端只保存哈希，离开本页后无法再次查看。
                   </p>
                 </div>
               ) : (
-                <div className="mt-5 rounded-xl bg-[#f9fafb] p-5 text-sm leading-7 text-[#6b7280]">
+                <div className="mt-5 rounded-field bg-surface p-5 text-sm leading-7 text-muted">
                   还没有新生成的凭证。创建后，这里会立即显示 UUID 和 secret_key。
                 </div>
               )}
-            </section>
+            </Card>
           </div>
 
-          <section className="rounded-2xl border border-[#e5e7eb] bg-[#ffffff] p-5 shadow-sm">
+          <Card>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="text-[11px] uppercase tracking-[0.24em] text-[#6b7280]">Inventory</div>
-                <h3 className="mt-2 text-xl font-semibold text-[#111827]">已有凭证</h3>
+                <Eyebrow>Inventory</Eyebrow>
+                <h3 className="mt-2 text-xl font-semibold text-ink">已有凭证</h3>
               </div>
-              <div className="rounded-full bg-[#eef2ff] px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-[#4f46e5]">
-                {credentials.length} Items
-              </div>
+              <Badge tone="accent">{credentials.length} Items</Badge>
             </div>
             <div className="mt-5 space-y-3">
               {credentials.length === 0 ? (
-                <div className="rounded-xl bg-[#f9fafb] p-4 text-sm text-[#6b7280]">暂无凭证。</div>
+                <div className="rounded-field bg-surface p-4 text-sm text-muted">暂无凭证。</div>
               ) : (
                 credentials.map((credential) => (
-                  <div
-                    key={credential.id}
-                    className="rounded-xl border border-[#e5e7eb] bg-white p-4"
-                  >
+                  <div key={credential.id} className="rounded-field border border-line bg-panel p-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <div className="font-medium text-[#111827]">{credential.name}</div>
-                        <div className="mt-1 break-all font-mono text-xs text-[#6b7280]">{credential.id}</div>
+                      <div className="min-w-0">
+                        <div className="font-medium text-ink">{credential.name}</div>
+                        <div className="mt-1 break-all font-mono text-xs text-muted">{credential.id}</div>
                       </div>
-                      <div className="text-xs uppercase tracking-[0.18em] text-[#9ca3af]">
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-faint">
                         {new Date(credential.created_at).toLocaleString()}
                       </div>
                     </div>
@@ -233,7 +207,7 @@ export default function CredentialPage() {
                 ))
               )}
             </div>
-          </section>
+          </Card>
         </div>
       </main>
     </div>

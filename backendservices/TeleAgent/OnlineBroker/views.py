@@ -15,14 +15,34 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.authtoken.models import Token
 
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, connection
 from django.db.models import Q, Count, OuterRef, Subquery, Max
-from .models import AgentClient, BrokerClientCredential, Conversation, Task, Message, TaskEvent, ConversationControl
+import base64
+import os
+
+from django.conf import settings
+from django.core.files.base import ContentFile
+from django.http import FileResponse
+
+from .models import (
+    AgentClient, BrokerClientCredential, Conversation, Task, Message, TaskEvent,
+    ConversationControl, FsBrowseRequest, PermissionRequest, FileTransfer,
+)
+from .reaping import TASK_LEASE_TIMEOUT_SECONDS, requeue_stale_tasks
 from .serializers import (
     AgentClientSerializer,
     BrokerClientCredentialCreateSerializer,
     BrokerClientCredentialSerializer,
     AgentClientRegisterSerializer,
+    FsBrowseRequestSerializer,
+    FsBrowseCreateSerializer,
+    FsBrowseAckSerializer,
+    PermissionRequestSerializer,
+    PermissionRequestCreateSerializer,
+    PermissionAnswerSerializer,
+    FileTransferSerializer,
+    FileTransferRequestSerializer,
+    FileTransferUploadSerializer,
     ConversationListSerializer,
     ConversationDetailSerializer,
     ConversationCreateSerializer,
@@ -37,7 +57,7 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
-TASK_LEASE_TIMEOUT_SECONDS = 90
+# TASK_LEASE_TIMEOUT_SECONDS 与回收逻辑统一在 reaping 模块（视图内联与管理命令共用）。
 # 过期任务回收扫描的最小间隔：每次 client 轮询都扫一遍太重，按 client 限频。
 STALE_SCAN_MIN_INTERVAL_SECONDS = 30.0
 _STALE_SCAN_LOCK = threading.Lock()
@@ -164,16 +184,32 @@ class QueuedTasksView(BrokerAPIView):
         except AgentClient.DoesNotExist:
             return Response({"detail": "Client not found."}, status=status.HTTP_404_NOT_FOUND)
         _maybe_requeue_stale_tasks(request.user, client_id)
-        qs = (
-            Task.objects.filter(status=Task.Status.QUEUED)
-            .filter(
-                Q(assigned_client_id__isnull=True) | Q(assigned_client_id=client_id)
+        # 原子认领：多台 client 同时轮询时，未分配的 QUEUED 任务可能被同一任务发给多端 → 重复执行。
+        # 在事务内用 select_for_update(skip_locked) 锁定匹配行，并立刻把未分配的盖上 assigned_client，
+        # 这样第二个轮询者不会再拿到它们。状态保持 QUEUED（broker PATCH 时再翻为 running）。
+        with transaction.atomic():
+            base_qs = (
+                Task.objects.filter(status=Task.Status.QUEUED)
+                .filter(
+                    Q(assigned_client_id__isnull=True) | Q(assigned_client_id=client_id)
+                )
+                .filter(conversation__owner=request.user)
+                .order_by("created_at")
             )
-            .filter(conversation__owner=request.user)
-            .order_by("created_at")
-        )
-        serializer = TaskListSerializer(qs, many=True)
-        return Response(serializer.data)
+            # SQLite 不支持行锁（select_for_update 会被忽略）；Postgres 下用 skip_locked 跳过被他人锁住的行。
+            if connection.features.has_select_for_update:
+                base_qs = base_qs.select_for_update(
+                    skip_locked=connection.features.has_select_for_update_skip_locked
+                )
+            tasks = list(base_qs)
+            unassigned_ids = [t.id for t in tasks if t.assigned_client_id is None]
+            if unassigned_ids:
+                Task.objects.filter(id__in=unassigned_ids).update(assigned_client_id=client_id)
+                for t in tasks:
+                    if t.assigned_client_id is None:
+                        t.assigned_client_id = client_id
+            serializer = TaskListSerializer(tasks, many=True)
+            return Response(serializer.data)
 
 
 class ConversationListCreateView(BrokerAPIView):
@@ -216,7 +252,11 @@ class ConversationListCreateView(BrokerAPIView):
 class ConversationDetailView(BrokerAPIView):
     def get(self, request, conv_id):
         try:
-            conv = Conversation.objects.get(pk=conv_id, owner=request.user)
+            # 预取 messages 及其 task，避免序列化 N 条消息时按消息逐条查 task 的 N+1。
+            conv = (
+                Conversation.objects.prefetch_related("messages__task")
+                .get(pk=conv_id, owner=request.user)
+            )
         except Conversation.DoesNotExist:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(ConversationDetailSerializer(conv).data)
@@ -376,6 +416,358 @@ class ControlDetailView(BrokerAPIView):
         return Response(ConversationControlSerializer(control).data)
 
 
+# ---------- 远程目录浏览（新建会话时选 Agent PC 上的工作目录）----------
+
+class FsBrowseCreateView(BrokerAPIView):
+    """Web 发起目录浏览请求：指定 client 与要列出的 path（空=该机用户主目录）。"""
+
+    def post(self, request):
+        serializer = FsBrowseCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        client_id = serializer.validated_data["client_id"]
+        try:
+            client = AgentClient.objects.get(pk=client_id, owner=request.user)
+        except AgentClient.DoesNotExist:
+            return Response({"detail": "Client not found."}, status=status.HTTP_404_NOT_FOUND)
+        # 指定会话时，约束根从会话 cwd 服务端派生（不信任前端），浏览被限制在 cwd 子树内。
+        conv = None
+        root_path = ""
+        conv_id = serializer.validated_data.get("conversation_id")
+        if conv_id:
+            conv = Conversation.objects.filter(pk=conv_id, owner=request.user).first()
+            if conv is None:
+                return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+            root_path = conv.cwd or ""
+        # 安全（纵深防御）：列出文件内容的浏览（include_files=True，下载文件浏览器）必须有可解析的
+        # 约束根（来自会话 cwd），否则可遍历该机任意文件树。无根则拒绝（broker 侧亦将空根视为拒绝）。
+        # 注：选工作目录的目录选择器（include_files=False）按设计跨全机浏览，不在此约束内。
+        include_files = bool(serializer.validated_data.get("include_files"))
+        if include_files and not root_path:
+            return Response(
+                {"detail": "conversation_id with a working directory is required for file browsing."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req = FsBrowseRequest.objects.create(
+            client=client,
+            conversation=conv,
+            path=serializer.validated_data.get("path") or "",
+            include_files=include_files,
+            root_path=root_path,
+        )
+        return Response(FsBrowseRequestSerializer(req).data, status=status.HTTP_201_CREATED)
+
+
+class FsBrowseDetailView(BrokerAPIView):
+    """Web 轮询目录浏览结果。"""
+
+    def get(self, request, req_id):
+        try:
+            req = FsBrowseRequest.objects.get(pk=req_id, client__owner=request.user)
+        except FsBrowseRequest.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(FsBrowseRequestSerializer(req).data)
+
+
+class PendingFsRequestsView(BrokerAPIView):
+    """LocalBroker 拉取分配给该 client 的待处理目录浏览请求。"""
+
+    def get(self, request):
+        client_id = request.query_params.get("client_id")
+        if not client_id:
+            return Response({"detail": "client_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            AgentClient.objects.get(pk=client_id, owner=request.user)
+        except AgentClient.DoesNotExist:
+            return Response({"detail": "Client not found."}, status=status.HTTP_404_NOT_FOUND)
+        qs = (
+            FsBrowseRequest.objects.filter(
+                status=FsBrowseRequest.Status.PENDING,
+                client_id=client_id,
+                client__owner=request.user,
+            )
+            .order_by("created_at")[:20]
+        )
+        return Response(FsBrowseRequestSerializer(qs, many=True).data)
+
+
+class FsRequestAckView(BrokerAPIView):
+    """LocalBroker 回传列目录结果（或失败原因）。"""
+
+    def patch(self, request, req_id):
+        try:
+            req = FsBrowseRequest.objects.get(pk=req_id, client__owner=request.user)
+        except FsBrowseRequest.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = FsBrowseAckSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        req.status = data["status"]
+        req.listed_path = data.get("listed_path") or ""
+        req.parent_path = data.get("parent_path")
+        req.entries = data.get("entries") or []
+        req.error = data.get("error") or ""
+        req.resolved_at = timezone.now()
+        req.save(update_fields=["status", "listed_path", "parent_path", "entries", "error", "resolved_at"])
+        return Response(FsBrowseRequestSerializer(req).data)
+
+
+# ---------- 交互式工具审批（人在环路）----------
+
+class PermissionRequestCreateView(BrokerAPIView):
+    """LocalBroker 就某个工具调用发起审批请求（pending），等待 Web 用户应答。"""
+
+    def post(self, request):
+        serializer = PermissionRequestCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            conv = Conversation.objects.get(pk=data["conversation_id"], owner=request.user)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+        task = None
+        if data.get("task_id"):
+            task = Task.objects.filter(pk=data["task_id"], conversation=conv).first()
+        # 「本会话总是允许」的工具：直接判为允许，hook 轮询即得 allowed，不再弹卡片。
+        remembered = data["tool_name"] in (conv.always_allow_tools or [])
+        req = PermissionRequest.objects.create(
+            conversation=conv,
+            task=task,
+            request_id=data.get("request_id") or "",
+            tool_name=data["tool_name"],
+            tool_input=data.get("tool_input") or {},
+            status=PermissionRequest.Status.ALLOWED if remembered else PermissionRequest.Status.PENDING,
+            resolved_at=timezone.now() if remembered else None,
+        )
+        return Response(PermissionRequestSerializer(req).data, status=status.HTTP_201_CREATED)
+
+
+class PermissionRequestDetailView(BrokerAPIView):
+    """GET：LocalBroker 轮询应答结果；PATCH：Web 用户应答（allow/deny，可勾选记住）。"""
+
+    def get(self, request, perm_id):
+        try:
+            req = PermissionRequest.objects.get(pk=perm_id, conversation__owner=request.user)
+        except PermissionRequest.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(PermissionRequestSerializer(req).data)
+
+    def patch(self, request, perm_id):
+        try:
+            req = PermissionRequest.objects.get(pk=perm_id, conversation__owner=request.user)
+        except PermissionRequest.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PermissionAnswerSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # 仅 pending 可应答；重复应答幂等返回当前状态。
+        if req.status == PermissionRequest.Status.PENDING:
+            decision = serializer.validated_data["decision"]
+            allow = decision == "allow"
+            req.status = PermissionRequest.Status.ALLOWED if allow else PermissionRequest.Status.DENIED
+            req.remember = bool(serializer.validated_data.get("remember"))
+            req.resolved_at = timezone.now()
+            req.save(update_fields=["status", "remember", "resolved_at"])
+            # 勾选「一直允许」+ 允许 → 持久化到会话，后续同工具自动放行。
+            if req.remember and allow:
+                conv = req.conversation
+                tools = list(conv.always_allow_tools or [])
+                if req.tool_name not in tools:
+                    tools.append(req.tool_name)
+                    conv.always_allow_tools = tools
+                    conv.save(update_fields=["always_allow_tools"])
+        return Response(PermissionRequestSerializer(req).data)
+
+
+class PendingPermissionsView(BrokerAPIView):
+    """Web 拉取某会话下仍待应答的审批请求（断线重连/刷新后兜底，不丢审批）。"""
+
+    def get(self, request, conv_id):
+        try:
+            conv = Conversation.objects.get(pk=conv_id, owner=request.user)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        qs = (
+            PermissionRequest.objects.filter(
+                conversation=conv, status=PermissionRequest.Status.PENDING
+            )
+            .order_by("created_at")[:50]
+        )
+        return Response(PermissionRequestSerializer(qs, many=True).data)
+
+
+class ConversationPermissionsView(BrokerAPIView):
+    """Web 拉取某会话内近期的全部审批（含已批准/已拒绝），按时间正序渲染进对话流。"""
+
+    def get(self, request, conv_id):
+        try:
+            conv = Conversation.objects.get(pk=conv_id, owner=request.user)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        qs = PermissionRequest.objects.filter(conversation=conv).order_by("created_at")[:100]
+        return Response(PermissionRequestSerializer(qs, many=True).data)
+
+
+# ---------- 远程文件下载（Agent PC → Django 中转 → Web 下载）----------
+
+def _mark_transfer_ready(transfer):
+    transfer.status = FileTransfer.Status.READY
+    transfer.ready_at = timezone.now()
+    transfer.expires_at = transfer.ready_at + timezone.timedelta(
+        hours=getattr(settings, "FILE_TRANSFER_TTL_HOURS", 24)
+    )
+
+
+class FileTransferRequestView(BrokerAPIView):
+    """发起一次文件传输：Web 文件浏览器点下载（pending，待 broker 上传），或 AI 命令直接建（随后上传）。"""
+
+    def post(self, request):
+        serializer = FileTransferRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            client = AgentClient.objects.get(pk=data["client_id"], owner=request.user)
+        except AgentClient.DoesNotExist:
+            return Response({"detail": "Client not found."}, status=status.HTTP_404_NOT_FOUND)
+        conv = None
+        if data.get("conversation_id"):
+            conv = Conversation.objects.filter(pk=data["conversation_id"], owner=request.user).first()
+            if conv is None:
+                return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+        root_path = (conv.cwd or "") if conv else ""
+        agent_initiated = bool(data.get("agent_initiated"))
+        # 安全（纵深防御）：web 发起的下载由 LocalBroker 读取 PC 上的文件，必须有可解析的约束根
+        # （来自会话 cwd），否则可被诱导读取任意路径（如 /etc/passwd）。无根则拒绝。
+        # agent 发起（teleagent-send）由 PC 命令自身读文件并直接上传，不经 broker 读盘，故不强制。
+        if not agent_initiated and not root_path:
+            return Response(
+                {"detail": "conversation_id with a working directory is required for file download."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        transfer = FileTransfer.objects.create(
+            client=client,
+            conversation=conv,
+            source_path=data["path"],
+            # 指定会话时，下载也约束在会话 cwd 子树内（与浏览一致）。
+            root_path=root_path,
+            filename=os.path.basename(data["path"].rstrip("/")) or "download",
+            agent_initiated=agent_initiated,
+        )
+        return Response(FileTransferSerializer(transfer).data, status=status.HTTP_201_CREATED)
+
+
+class PendingFileTransfersView(BrokerAPIView):
+    """LocalBroker 拉取该 client 待上传的文件传输（仅 Web 发起的 pending 需要 broker 读盘上传）。"""
+
+    def get(self, request):
+        client_id = request.query_params.get("client_id")
+        if not client_id:
+            return Response({"detail": "client_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            AgentClient.objects.get(pk=client_id, owner=request.user)
+        except AgentClient.DoesNotExist:
+            return Response({"detail": "Client not found."}, status=status.HTTP_404_NOT_FOUND)
+        qs = (
+            FileTransfer.objects.filter(
+                status=FileTransfer.Status.PENDING, client_id=client_id, client__owner=request.user,
+            )
+            .order_by("created_at")[:20]
+        )
+        return Response(FileTransferSerializer(qs, many=True).data)
+
+
+class FileTransferUploadView(BrokerAPIView):
+    """LocalBroker / teleagent-send 上传文件内容（base64）。校验大小上限后落盘并置为 ready。"""
+
+    def post(self, request, transfer_id):
+        try:
+            transfer = FileTransfer.objects.get(pk=transfer_id, client__owner=request.user)
+        except FileTransfer.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = FileTransferUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            raw = base64.b64decode(data["content_b64"], validate=True)
+        except Exception:
+            transfer.status = FileTransfer.Status.FAILED
+            transfer.error = "invalid base64 content"
+            transfer.save(update_fields=["status", "error"])
+            return Response({"detail": "invalid base64 content."}, status=status.HTTP_400_BAD_REQUEST)
+        max_bytes = getattr(settings, "FILE_TRANSFER_MAX_BYTES", 50 * 1024 * 1024)
+        if len(raw) > max_bytes:
+            transfer.status = FileTransfer.Status.FAILED
+            transfer.error = f"file too large ({len(raw)} > {max_bytes} bytes)"
+            transfer.save(update_fields=["status", "error"])
+            return Response({"detail": transfer.error}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        filename = data["filename"] or transfer.filename or "download"
+        transfer.filename = filename
+        transfer.content_type = data.get("content_type") or "application/octet-stream"
+        transfer.size = len(raw)
+        transfer.blob.save(filename, ContentFile(raw), save=False)
+        _mark_transfer_ready(transfer)
+        transfer.error = ""
+        transfer.save(update_fields=["filename", "content_type", "size", "blob", "status", "ready_at", "expires_at", "error"])
+        return Response(FileTransferSerializer(transfer).data)
+
+
+class FileTransferDetailView(BrokerAPIView):
+    """GET：Web 轮询状态；PATCH：LocalBroker 回报失败（读不到/过大/无权限）。"""
+
+    def get(self, request, transfer_id):
+        try:
+            transfer = FileTransfer.objects.get(pk=transfer_id, client__owner=request.user)
+        except FileTransfer.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(FileTransferSerializer(transfer).data)
+
+    def patch(self, request, transfer_id):
+        try:
+            transfer = FileTransfer.objects.get(pk=transfer_id, client__owner=request.user)
+        except FileTransfer.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        if request.data.get("status") == FileTransfer.Status.FAILED and transfer.status == FileTransfer.Status.PENDING:
+            transfer.status = FileTransfer.Status.FAILED
+            transfer.error = str(request.data.get("error") or "")[:1000]
+            transfer.save(update_fields=["status", "error"])
+        return Response(FileTransferSerializer(transfer).data)
+
+
+class ConversationFilesView(BrokerAPIView):
+    """Web 拉取某会话内可下载的文件（AI 主动发送的文件出现在这里，渲染下载卡片）。"""
+
+    def get(self, request, conv_id):
+        try:
+            conv = Conversation.objects.get(pk=conv_id, owner=request.user)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        qs = (
+            FileTransfer.objects.filter(conversation=conv, status=FileTransfer.Status.READY)
+            .order_by("-created_at")[:100]
+        )
+        return Response(FileTransferSerializer(qs, many=True).data)
+
+
+def file_download_view(request, transfer_id):
+    """鉴权后流式下载文件内容（手动 token 鉴权，避免 DRF 内容协商干扰二进制响应）。"""
+    user = _authenticate_stream_request(request)
+    if user is None:
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+    try:
+        transfer = FileTransfer.objects.get(
+            pk=transfer_id, client__owner=user, status=FileTransfer.Status.READY,
+        )
+    except FileTransfer.DoesNotExist:
+        return JsonResponse({"detail": "Not found."}, status=404)
+    if not transfer.blob:
+        return JsonResponse({"detail": "File not available."}, status=404)
+    response = FileResponse(
+        transfer.blob.open("rb"),
+        as_attachment=True,
+        filename=transfer.filename or "download",
+        content_type=transfer.content_type or "application/octet-stream",
+    )
+    return response
+
+
 class SendMessageView(BrokerAPIView):
     """Create a new message and enqueue a task for the conversation."""
 
@@ -494,37 +886,8 @@ def _maybe_requeue_stale_tasks(user, client_id):
         if now - last < STALE_SCAN_MIN_INTERVAL_SECONDS:
             return 0
         _LAST_STALE_SCAN[key] = now
-    return _requeue_stale_tasks(user, client_id)
-
-
-def _requeue_stale_tasks(user, client_id):
-    stale_before = timezone.now() - timezone.timedelta(seconds=TASK_LEASE_TIMEOUT_SECONDS)
-    stale_qs = (
-        Task.objects.filter(status=Task.Status.RUNNING, conversation__owner=user)
-        .filter(Q(assigned_client_id__isnull=True) | Q(assigned_client_id=client_id))
-        .filter(Q(heartbeat_at__lt=stale_before) | Q(heartbeat_at__isnull=True, started_at__lt=stale_before))
-    )
-    stale_count = stale_qs.count()
-    for task in stale_qs:
-        task.status = Task.Status.QUEUED
-        task.started_at = None
-        task.heartbeat_at = None
-        task.finished_at = None
-        task.result_text = None
-        task.exit_code = None
-        task.save(
-            update_fields=[
-                "status",
-                "started_at",
-                "heartbeat_at",
-                "finished_at",
-                "result_text",
-                "exit_code",
-            ]
-        )
-        # 重新入队：清掉上一轮的事件行，避免与重跑的事件混在一起。
-        task.event_rows.all().delete()
-    return stale_count
+    # 内联回收按 client 限频；权威的全量回收由 reap_stale_tasks 管理命令周期性执行。
+    return requeue_stale_tasks(user=user, client_id=client_id)
 
 
 class TaskDetailView(BrokerAPIView):

@@ -25,7 +25,7 @@ _INSECURE_SECRET_KEY = 'django-insecure-w1-w6mc!)ddwdin!9h)z28oasvsoho@ktu55h2%o
 SECRET_KEY = os.environ.get('SECRET_KEY', _INSECURE_SECRET_KEY)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
+DEBUG = os.environ.get('DEBUG', 'False').lower() in ('true', '1', 'yes')
 
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if h.strip()]
 
@@ -145,6 +145,18 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = os.environ.get('STATIC_ROOT', str(BASE_DIR / 'staticfiles'))
 
+# Media（文件传输落盘）。生产应挂到数据卷；下载经鉴权视图流式返回，不直接暴露静态目录。
+MEDIA_ROOT = os.environ.get('MEDIA_ROOT', str(BASE_DIR / 'media'))
+MEDIA_URL = 'media/'
+# 单个文件传输的大小上限（字节），默认 50MB；超出拒绝（base64 中转，过大不适合）。
+FILE_TRANSFER_MAX_BYTES = int(os.environ.get('FILE_TRANSFER_MAX_BYTES', str(50 * 1024 * 1024)))
+# 文件传输有效期（小时），过期由清理命令删除。
+FILE_TRANSFER_TTL_HOURS = int(os.environ.get('FILE_TRANSFER_TTL_HOURS', '24'))
+# base64 中转需放宽 DRF/Django 的请求体上限（约为文件大小的 4/3 再留余量）。
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get('DATA_UPLOAD_MAX_MEMORY_SIZE', str(FILE_TRANSFER_MAX_BYTES * 2))
+)
+
 # CSRF / HTTPS (for reverse proxy)
 CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()]
 
@@ -156,6 +168,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Django REST framework
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        # broker 客户端 Token（每条凭证专属，最小授权）。与下面的 TokenAuthentication 同用
+        # 关键字 "Token"，必须排在其前：本类对非 broker Token 返回 None 回退，由 TokenAuthentication
+        # 校验用户主 Token，从而两类 Token 在所有 broker 端点皆可用。
+        'OnlineBroker.authentication.BrokerClientTokenAuthentication',
         'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ],
@@ -192,11 +208,6 @@ LOG_LEVEL_ENV = os.environ.get("LOG_LEVEL", "DEBUG")
 LOG_MAX_SIZE = parse_log_size(os.environ.get("LOG_MAX_SIZE", "10MB"))
 LOG_BACKUP_COUNT = int(os.environ.get("LOG_BACKUP_COUNT", "100") or 100)
 LOG_FORMAT_ENV = os.environ.get("LOG_FORMAT", "verbose")
-
-print(f"LOG_LEVEL_ENV: {LOG_LEVEL_ENV}")
-print(f"LOG_MAX_SIZE: {LOG_MAX_SIZE}")
-print(f"LOG_BACKUP_COUNT: {LOG_BACKUP_COUNT}")
-print(f"LOG_FORMAT_ENV: {LOG_FORMAT_ENV}")
 
 # Log directory
 LOG_DIR = os.path.join(BASE_DIR, 'logs')

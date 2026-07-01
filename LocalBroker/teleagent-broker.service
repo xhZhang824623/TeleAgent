@@ -1,0 +1,22 @@
+[Unit]
+Description=TeleAgent LocalBroker (headless)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ① python 必须是「装了 PyQt5」的那个解释器（%h = 你的家目录）。
+#    本机用 miniconda 的；若你用系统 python（apt install python3-pyqt5），改成 /usr/bin/python3。
+ExecStart=%h/miniconda3/bin/python3 %h/dev/TeleAgent/LocalBroker/broker_service.py run
+# ② PATH 要包含 Agent CLI（claude/cursor 等）所在目录。claude 默认在 ~/.local/bin。
+#    若用 nvm 装的 codex 等，把你的 node bin 也加进来，如 %h/.nvm/versions/node/<版本>/bin。
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# ③ 后端用自签名 HTTPS 证书时保留这行；上正式证书后删除。
+Environment=BROKER_INSECURE_SSL=1
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
